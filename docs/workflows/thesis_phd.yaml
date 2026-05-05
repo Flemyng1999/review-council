@@ -4,6 +4,7 @@ description: |
   Doctoral thesis review. Hard thresholds for novelty, independence, and
   foundational mastery. For cumulative format, coherence is dominant.
   Canonical ingestion: source -> frozen/manuscript.pdf -> MinerU -> normalized/manuscript.md.
+  Philosophy: paper_shape anchors all critique; claim extraction front-loaded.
 
 stages:
 - id: ensure_frozen_pdf
@@ -33,30 +34,42 @@ stages:
   command: build-units
   positional: [normalized/manuscript.md, units]
 
+- id: paper_shape
+  needs: [units/macro/whole.md]
+  produces: [reviews/paper_shape.md]
+  command: paper-shape
+  positional: [units/macro/whole.md, reviews/paper_shape.md]
+  flags: ["--case-id={case_id}", "--case-type={case_type}"]
+
 - id: deepseek_macro
-  description: Whole-thesis review (kappa for cumulative theses).
   needs: [units/macro/whole.md]
   produces: [reviews/deepseek/macro/whole.json]
   command: deepseek-review-unit
   positional: [units/macro/whole.md, reviews/deepseek/macro/whole.json]
   flags: ["--case-id={case_id}", "--case-type={case_type}", "--layer=macro", "--unit-id=whole"]
 
+- id: extract_claims_draft
+  needs: [units/macro/whole.md]
+  produces: [evidence/claims_draft.json]
+  command: extract-claims
+  positional: [units/macro/whole.md, evidence/claims_draft.json]
+  flags: ["--case-id={case_id}", "--case-type={case_type}", "--unit-id=whole"]
+
 - id: deepseek_chapters
   fanout_pattern: units/chapters/chapter_*.md
   produces_template: reviews/deepseek/chapters/{stem}.json
   command: deepseek-review-unit
   positional_template: ["{unit}", "{output}"]
-  flags_template: ["--case-id={case_id}", "--case-type={case_type}", "--layer=chapter", "--unit-id={stem}"]
+  flags_template: ["--case-id={case_id}", "--case-type={case_type}", "--layer=chapter", "--unit-id={stem}", "--claims=evidence/claims_draft.json"]
 
 - id: deepseek_sections
-  description: Per-section review (fanout). Filtered by units/risk.json.
   fanout_pattern: units/sections/section_*.md
   risk_threshold: 30.0
   risk_table: units/risk.json
   produces_template: reviews/deepseek/sections/{stem}.json
   command: deepseek-review-unit
   positional_template: ["{unit}", "{output}"]
-  flags_template: ["--case-id={case_id}", "--case-type={case_type}", "--layer=section", "--unit-id={stem}"]
+  flags_template: ["--case-id={case_id}", "--case-type={case_type}", "--layer=section", "--unit-id={stem}", "--claims=evidence/claims_draft.json"]
 
 - id: aggregate
   needs: [reviews/deepseek]
@@ -65,30 +78,19 @@ stages:
   positional: [reviews/deepseek, reviews/issue_graph.json]
   flags: ["--case-id={case_id}"]
 
-- id: extract_claims_draft
-  description: DeepSeek-extract author claims into evidence/claims_draft.json.
-  needs: [units/macro/whole.md]
-  produces: [evidence/claims_draft.json]
-  command: extract-claims
-  positional: [units/macro/whole.md, evidence/claims_draft.json]
-  flags: ["--case-id={case_id}", "--case-type={case_type}", "--unit-id=whole"]
-
 - id: claim_matrix_review
-  description: Human edits evidence/claims_draft.json into evidence/claim_evidence_matrix.json.
   needs: [evidence/claims_draft.json]
   produces: [evidence/claim_evidence_matrix.json]
   gate: human
-  instruction: Edit evidence/claim_evidence_matrix.json from the draft. Add CLM ids, fix anchors, classify claim types, label evidence strength.
+  instruction: Edit evidence/claim_evidence_matrix.json from the draft.
 
 - id: link_issues_to_claims
-  description: Heuristically link issues to claims by anchor proximity.
   needs: [evidence/claim_evidence_matrix.json, reviews/issue_graph.json]
   produces: [evidence/claim_evidence_matrix.json]
   command: link-issues-to-claims
   positional: [evidence/claim_evidence_matrix.json, reviews/issue_graph.json]
 
 - id: render_claim_matrix
-  description: Render claim matrix to a Markdown view.
   needs: [evidence/claim_evidence_matrix.json]
   produces: [evidence/claim_evidence_matrix.md]
   command: render-claim-matrix
@@ -96,7 +98,6 @@ stages:
   flags: ["--issue-graph=reviews/issue_graph.json"]
 
 - id: synthesize_comments_draft
-  description: Cheap pre-pass — cluster + severity-cap filter on issue_graph.
   needs: [reviews/issue_graph.json]
   produces: [comments/review_comments.draft.json]
   command: synthesize-comments
@@ -104,12 +105,11 @@ stages:
   flags: ["--claim-matrix=evidence/claim_evidence_matrix.json"]
 
 - id: meta_review_issues
-  description: Strong-model meta-review — cross-anchor dedup, severity recalibration, track assignment.
-  needs: [reviews/issue_graph.json, comments/review_comments.draft.json]
+  needs: [reviews/issue_graph.json, comments/review_comments.draft.json, reviews/paper_shape.md]
   produces: [reviews/meta_review.md, comments/review_comments.meta.json]
   command: meta-review-issues
   positional: [reviews/issue_graph.json, reviews/meta_review.md, comments/review_comments.meta.json]
-  flags: ["--draft=comments/review_comments.draft.json", "--claim-matrix=evidence/claim_evidence_matrix.json", "--units-root=units"]
+  flags: ["--draft=comments/review_comments.draft.json", "--claim-matrix=evidence/claim_evidence_matrix.json", "--paper-shape=reviews/paper_shape.md", "--units-root=units"]
 
 - id: dissent
   needs: [reviews/issue_graph.json]
@@ -124,14 +124,12 @@ stages:
   instruction: Run templates/prompts/integrity_check.md. For cumulative theses, verify per-paper candidate contribution statements (GAP-008).
 
 - id: foundations_check
-  description: Disciplinary breadth and depth check (Foundational Mastery dimension).
   needs: [units/macro/whole.md]
   produces: [reviews/foundations_check.md]
   gate: human
   instruction: Verify FND-04 (solid breadth + systematic depth) per China MOE doctoral standards.
 
 - id: mentor_voice
-  description: Chair / supervisor view (human-only).
   produces: [reviews/mentor_voice.md]
   gate: human
   instruction: Chair records candidate's autonomy and ability to defend choices in defense. AI must not generate this file.
@@ -147,6 +145,14 @@ stages:
   produces: [comments/author_facing_comments.md]
   command: render-comments
   positional: [comments/review_comments.json, provenance/source_map.jsonl, comments/author_facing_comments.md]
+  flags: ["--mode=author", "--paper-shape=reviews/paper_shape.md"]
+
+- id: render_supervisor_comments
+  needs: [comments/review_comments.json, provenance/source_map.jsonl]
+  produces: [comments/supervisor_internal.md]
+  command: render-comments
+  positional: [comments/review_comments.json, provenance/source_map.jsonl, comments/supervisor_internal.md]
+  flags: ["--mode=supervisor", "--paper-shape=reviews/paper_shape.md"]
 
 - id: editorial_decision
   needs: [comments/author_facing_comments.md]

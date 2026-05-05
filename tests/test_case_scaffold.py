@@ -619,6 +619,42 @@ def test_render_claim_matrix_writes_markdown(tmp_path: Path) -> None:
     assert "moderate" in rendered
 
 
+def test_synthesize_comments_assigns_default_revision_priority(tmp_path: Path) -> None:
+    issue_graph = tmp_path / "issue_graph.json"
+    issue_graph.write_text(
+        json.dumps(
+            {
+                "issues": [
+                    {
+                        "id": "ISS-A",
+                        "proposed_severity": "major",
+                        "type": "method",
+                        "dimension": "methodology",
+                        "anchor": {"page": 5, "line_start": 10},
+                    },
+                    {
+                        "id": "ISS-B",
+                        "proposed_severity": "moderate",
+                        "type": "writing",
+                        "dimension": "clarity",
+                        "anchor": {"page": 6, "line_start": 20},
+                    },
+                ],
+                "clusters": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "draft.json"
+    synthesize_comments(issue_graph, output)
+    comments = json.loads(output.read_text(encoding="utf-8"))
+    by_id = {c["derived_from_issues"][0]: c for c in comments}
+    assert by_id["ISS-A"]["revision_priority"] == "high"
+    assert by_id["ISS-A"]["final_severity"] == "major"
+    assert by_id["ISS-B"]["revision_priority"] == "medium"
+    assert by_id["ISS-B"]["final_severity"] == "moderate"
+
+
 def test_synthesize_comments_severity_filter_and_dedup(tmp_path: Path) -> None:
     issue_graph = tmp_path / "issue_graph.json"
     issue_graph.write_text(
@@ -654,11 +690,11 @@ def test_synthesize_comments_severity_filter_and_dedup(tmp_path: Path) -> None:
     stats = synthesize_comments(issue_graph, output)
 
     comments = json.loads(output.read_text(encoding="utf-8"))
-    severities = [c["severity"] for c in comments]
+    severities = [c["final_severity"] for c in comments]
     assert severities == ["blocking", "major", "moderate"]
     assert stats["kept_comments"] == 3
     assert stats["input_issues"] == 5
-    moderate = next(c for c in comments if c["severity"] == "moderate")
+    moderate = next(c for c in comments if c["final_severity"] == "moderate")
     assert sorted(moderate["derived_from_issues"]) == ["ISS-0003", "ISS-0004"]
 
 
@@ -729,7 +765,7 @@ def test_render_comments_groups_by_track(tmp_path: Path) -> None:
     assert 0 <= main_pos < methods_pos
 
 
-def test_render_comments_hides_provenance_by_default(tmp_path: Path) -> None:
+def test_render_modes_author_hides_supervisor_keeps_provenance(tmp_path: Path) -> None:
     source_map = tmp_path / "source_map.jsonl"
     source_map.write_text("", encoding="utf-8")
     comments = tmp_path / "comments.json"
@@ -740,6 +776,8 @@ def test_render_comments_hides_provenance_by_default(tmp_path: Path) -> None:
                     "id": "C-1",
                     "comment": "x",
                     "line_start": 10,
+                    "final_severity": "major",
+                    "revision_priority": "high",
                     "derived_from_issues": ["ISS-0007"],
                     "linked_claims": ["CLM-0003"],
                 }
@@ -750,15 +788,19 @@ def test_render_comments_hides_provenance_by_default(tmp_path: Path) -> None:
     output = tmp_path / "out.md"
     from review_council.comments import render_comments as render
 
-    render(comments, source_map, output)
-    rendered = output.read_text(encoding="utf-8")
-    assert "Provenance" not in rendered
-    assert "ISS-0007" not in rendered
+    render(comments, source_map, output, mode="author")
+    rendered_author = output.read_text(encoding="utf-8")
+    assert "Provenance" not in rendered_author
+    assert "ISS-0007" not in rendered_author
+    assert "Author-Facing Review Comments" in rendered_author
+    assert "Priority High" in rendered_author
 
-    render(comments, source_map, output, show_provenance=True)
-    rendered = output.read_text(encoding="utf-8")
-    assert "Provenance" in rendered
-    assert "ISS-0007" in rendered
+    render(comments, source_map, output, mode="supervisor")
+    rendered_supervisor = output.read_text(encoding="utf-8")
+    assert "Provenance" in rendered_supervisor
+    assert "ISS-0007" in rendered_supervisor
+    assert "Supervisor Internal Review" in rendered_supervisor
+    assert "priority=high" in rendered_supervisor
 
 
 def test_backfill_prefers_section_over_chapter_over_macro(tmp_path: Path) -> None:

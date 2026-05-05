@@ -149,7 +149,7 @@ def render_claim_matrix_md(
             for iid in claim.linked_issues:
                 issue = issue_index.get(iid, {})
                 if issue:
-                    severity = issue.get("proposed_severity") or issue.get("confirmed_severity") or "?"
+                    severity = issue.get("final_severity") or issue.get("proposed_severity") or "?"
                     diagnosis = (issue.get("diagnosis") or "")[:120]
                     lines.append(f"  - **{iid}** ({severity}): {diagnosis}")
                 else:

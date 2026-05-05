@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from review_council.case.manifest import CASE_TYPES, CaseManifest
@@ -19,6 +20,7 @@ from review_council.config import get_config_value
 from review_council.freeze import freeze_docx_to_pdf
 from review_council.issue_graph import aggregate as aggregate_issue_graph
 from review_council.meta_review import META_DEFAULT_MODEL, backfill_anchors, run_meta_review
+from review_council.paper_shape import run_paper_shape
 from review_council.prompts import render_prompt_template
 from review_council.provenance import build_markdown_line_map
 from review_council.provenance_pdf import build_pdf_page_map
@@ -72,11 +74,23 @@ def build_parser() -> argparse.ArgumentParser:
     map_pdf_pages.add_argument("pdf_path", type=Path)
     map_pdf_pages.add_argument("source_map_path", type=Path)
 
-    render = subparsers.add_parser("render-comments", help="Render author-facing comments with page/line anchors")
+    render = subparsers.add_parser("render-comments", help="Render review comments. --mode author hides provenance and sorts by revision_priority; --mode supervisor keeps full traceability.")
     render.add_argument("comments_path", type=Path)
     render.add_argument("source_map_path", type=Path)
     render.add_argument("output_path", type=Path)
-    render.add_argument("--show-provenance", action="store_true", help="Include ISS/CLM provenance lines (internal view; off by default for author view)")
+    render.add_argument("--mode", choices=["author", "supervisor"], default="author")
+    render.add_argument("--paper-shape", type=Path, default=None, help="Optional reviews/paper_shape.md to embed at top")
+    render.add_argument("--show-provenance", action="store_true", help="Deprecated alias for --mode supervisor")
+
+    paper_shape = subparsers.add_parser("paper-shape", help="Forced gestalt artifact: best version, current shape, top three transformation actions")
+    paper_shape.add_argument("unit_path", type=Path, help="units/macro/whole.md")
+    paper_shape.add_argument("output_path", type=Path, help="reviews/paper_shape.md")
+    paper_shape.add_argument("--template", type=Path, default=Path("templates/prompts/paper_shape.md"))
+    paper_shape.add_argument("--case-id", default="")
+    paper_shape.add_argument("--case-type", default="journal", choices=CASE_TYPES)
+    paper_shape.add_argument("--config", type=Path, default=Path("config/secrets.local.env"))
+    paper_shape.add_argument("--model", default=DEFAULT_MODEL)
+    paper_shape.add_argument("--base-url", default=DEFAULT_BASE_URL)
 
     deepseek_review = subparsers.add_parser("deepseek-review-unit", help="Run a DeepSeek layered review prompt on one text unit")
     deepseek_review.add_argument("unit_path", type=Path)
@@ -92,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     deepseek_review.add_argument("--layer", default="section", choices=["macro", "chapter", "section", "micro"])
     deepseek_review.add_argument("--case-type", default="journal", choices=CASE_TYPES)
     deepseek_review.add_argument("--rubrics-dir", type=Path, default=None, help="Defaults to <repo>/rubrics")
+    deepseek_review.add_argument("--claims", type=Path, default=None, help="Optional evidence/claims_draft.json to ground section/chapter review on author claims")
     deepseek_review.add_argument("--config", type=Path, default=Path("config/secrets.local.env"))
     deepseek_review.add_argument("--model", default=DEFAULT_MODEL)
     deepseek_review.add_argument("--base-url", default=DEFAULT_BASE_URL)
@@ -120,6 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
     meta_review.add_argument("--base-url", default=DEFAULT_BASE_URL)
     meta_review.add_argument("--top-n", type=int, default=80, help="Send the top-N severity-sorted issues to the strong model")
     meta_review.add_argument("--units-root", type=Path, default=None, help="Optional units/ root for chapter-level anchor backfill")
+    meta_review.add_argument("--paper-shape", type=Path, default=None, help="Optional reviews/paper_shape.md gestalt anchor")
 
     backfill = subparsers.add_parser("backfill-comment-anchors", help="Fill missing line/page anchors in a comments JSON from issue_graph + units")
     backfill.add_argument("comments_path", type=Path)
@@ -218,13 +234,33 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "render-comments":
+        mode = "supervisor" if args.show_provenance else args.mode
         render_comments(
             args.comments_path,
             args.source_map_path,
             args.output_path,
-            show_provenance=args.show_provenance,
+            mode=mode,
+            paper_shape_path=args.paper_shape,
         )
         print(args.output_path)
+        return 0
+
+    if args.command == "paper-shape":
+        api_key = get_config_value("DEEPSEEK_API_KEY", args.config)
+        if not api_key:
+            print("ERROR: DEEPSEEK_API_KEY is missing from environment or local config")
+            return 1
+        path = run_paper_shape(
+            unit_path=args.unit_path,
+            output_path=args.output_path,
+            prompt_template=args.template,
+            api_key=api_key,
+            case_id=args.case_id,
+            case_type=args.case_type,
+            model=args.model,
+            base_url=args.base_url,
+        )
+        print(path)
         return 0
 
     if args.command == "list-rubrics":
@@ -246,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
             api_key=api_key,
             draft_path=args.draft,
             claim_matrix_path=args.claim_matrix,
+            paper_shape_path=args.paper_shape,
             units_root=args.units_root,
             model=args.model,
             base_url=args.base_url,
@@ -259,14 +296,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "backfill-comment-anchors":
-        import json as _json
-
-        comments = _json.loads(args.comments_path.read_text(encoding="utf-8"))
-        graph = _json.loads(args.issue_graph_path.read_text(encoding="utf-8"))
+        comments = json.loads(args.comments_path.read_text(encoding="utf-8"))
+        graph = json.loads(args.issue_graph_path.read_text(encoding="utf-8"))
         issues = graph.get("issues", []) if isinstance(graph, dict) else []
         n = backfill_anchors(comments, issues, units_root=args.units_root)
         args.comments_path.write_text(
-            _json.dumps(comments, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            json.dumps(comments, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
         print(f"{n} anchors backfilled in {args.comments_path}")
         return 0
@@ -376,6 +411,23 @@ def main(argv: list[str] | None = None) -> int:
         rubrics_dir = args.rubrics_dir or (repo_root() / "rubrics")
         rubrics = select_rubrics(rubrics_dir, args.case_type, _layer_alias(args.layer))
         rubric_block = render_checks_block(rubrics) or "(no applicable rubric checks for this layer)"
+        claim_block = "(no claim draft supplied)"
+        if args.claims and args.claims.exists():
+            try:
+                claims_data = json.loads(args.claims.read_text(encoding="utf-8"))
+                claims_list = claims_data.get("claims", []) if isinstance(claims_data, dict) else []
+                if claims_list:
+                    lines = []
+                    for claim in claims_list[:30]:
+                        cid = claim.get("id", "?")
+                        ctype = claim.get("type", "?")
+                        ctext = (claim.get("text") or "").strip().replace("\n", " ")
+                        if len(ctext) > 160:
+                            ctext = ctext[:157] + "..."
+                        lines.append(f"- [{cid}] ({ctype}) {ctext}")
+                    claim_block = "\n".join(lines)
+            except (json.JSONDecodeError, OSError):
+                pass
         prompt = render_prompt_template(
             args.template,
             {
@@ -384,6 +436,7 @@ def main(argv: list[str] | None = None) -> int:
                 "unit_id": args.unit_id or args.unit_path.stem,
                 "layer": args.layer,
                 "rubric_checks": rubric_block,
+                "claim_context": claim_block,
             },
         )
         prompt = prompt.rstrip() + "\n\n[Supplied unit text]\n" + unit_text

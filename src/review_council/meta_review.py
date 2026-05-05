@@ -39,6 +39,7 @@ def run_meta_review(
     api_key: str,
     draft_path: Path | None = None,
     claim_matrix_path: Path | None = None,
+    paper_shape_path: Path | None = None,
     units_root: Path | None = None,
     model: str = META_DEFAULT_MODEL,
     base_url: str = DEFAULT_BASE_URL,
@@ -50,7 +51,7 @@ def run_meta_review(
         issues,
         key=lambda issue: (
             SEVERITY_ORDER.get(
-                str(issue.get("confirmed_severity") or issue.get("proposed_severity") or ""),
+                str(issue.get("final_severity") or issue.get("proposed_severity") or ""),
                 99,
             ),
             (issue.get("anchor") or {}).get("line_start") or 0,
@@ -69,13 +70,20 @@ def run_meta_review(
     if claim_matrix_path and claim_matrix_path.exists():
         context["claim_matrix"] = json.loads(claim_matrix_path.read_text(encoding="utf-8"))
 
+    paper_shape_md = ""
+    if paper_shape_path and paper_shape_path.exists():
+        paper_shape_md = paper_shape_path.read_text(encoding="utf-8").strip()
+
     prompt = render_prompt_template(prompt_template, {})
-    prompt = (
-        prompt.rstrip()
-        + "\n\n[Supplied issue graph and context]\n```json\n"
+    parts: list[str] = [prompt.rstrip()]
+    if paper_shape_md:
+        parts.append("[Paper shape — gestalt anchor, read this first]\n" + paper_shape_md)
+    parts.append(
+        "[Supplied issue graph and context]\n```json\n"
         + json.dumps(context, ensure_ascii=False, indent=2)
-        + "\n```\n"
+        + "\n```"
     )
+    prompt = "\n\n".join(parts) + "\n"
 
     response = chat_completion(
         DeepSeekRequest(

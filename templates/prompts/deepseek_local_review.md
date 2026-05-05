@@ -34,6 +34,14 @@ integrity.
 
 {rubric_checks}
 
+[主张上下文]
+The author's draft claims (CLM-####) extracted at the macro level are listed
+below. When an issue concerns one of these claims, set `targets_claims` to
+the relevant CLM ids. This grounds the local review in what the author is
+trying to prove, not just what is locally underspecified.
+
+{claim_context}
+
 [边界]
 Do not invent methods, results, references, page numbers, or school rules.
 Separate fatal/major issues from improvement suggestions. If evidence is
@@ -68,6 +76,7 @@ Return valid JSON only:
       "dimension": "significance|novelty|methodology|evidence|reproducibility|clarity|independence|coherence|foundational_mastery|integrity",
       "type": "concept|structure|method|evidence|validation|remote_sensing|writing|citation|format",
       "triggered_check_ids": [],
+      "targets_claims": [],
       "anchor": {"page": null, "line_start": null, "line_end": null},
       "quote": "",
       "diagnosis": "",

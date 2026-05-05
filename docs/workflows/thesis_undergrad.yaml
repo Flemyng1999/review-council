@@ -3,7 +3,10 @@ case_type: thesis_undergrad
 description: |
   Layered review for an undergraduate thesis or capstone.
   Canonical ingestion: source -> frozen/manuscript.pdf -> MinerU -> normalized/manuscript.md.
-  See docs/paper_ingestion_protocol.md.
+  Philosophy: review = judging what the paper should become, not problem mining.
+  paper_shape (gestalt) anchors all downstream critique; claim extraction is
+  front-loaded so chapter/section reviews ground their findings in the
+  author's stated claims.
 
 stages:
 - id: ensure_frozen_pdf
@@ -13,7 +16,6 @@ stages:
   instruction: |
     For DOCX source: open in Microsoft Word and export to PDF, then save as frozen/manuscript.pdf.
     For native PDF source: copy or symlink source/<file>.pdf to frozen/manuscript.pdf.
-    Pandoc DOCX->Markdown is not supported (breaks equations). LibreOffice fallback only when Word is unavailable; document the choice in manifest.yaml.
 
 - id: mineru_extract
   description: Run MinerU on frozen/manuscript.pdf to produce normalized Markdown and assets.
@@ -22,9 +24,7 @@ stages:
   gate: human
   instruction: |
     On the Linux GPU host (ubuntu-303):
-      cd ~/Code/review-council
       bash scripts/mineru_case_extract.sh cases/<case-id>/frozen/manuscript.pdf cases/<case-id>
-    See docs/MinerU使用指南.md.
 
 - id: ensure_provenance
   description: Fallback line-based source map if MinerU did not write provenance/source_map.jsonl.
@@ -34,11 +34,19 @@ stages:
   positional: [normalized/manuscript.md, provenance/source_map.jsonl]
 
 - id: build_units
-  description: Build hierarchical review units (macro / chapters / sections).
+  description: Build hierarchical review units (macro / chapters / sections) and units/risk.json.
   needs: [normalized/manuscript.md]
   produces: [units/index.md]
   command: build-units
   positional: [normalized/manuscript.md, units]
+
+- id: paper_shape
+  description: Forced gestalt judgment — best version, current shape, top three transformation actions. Anchors all downstream critique.
+  needs: [units/macro/whole.md]
+  produces: [reviews/paper_shape.md]
+  command: paper-shape
+  positional: [units/macro/whole.md, reviews/paper_shape.md]
+  flags: ["--case-id={case_id}", "--case-type={case_type}"]
 
 - id: deepseek_macro
   description: Whole-manuscript layered review.
@@ -48,23 +56,31 @@ stages:
   positional: [units/macro/whole.md, reviews/deepseek/macro/whole.json]
   flags: ["--case-id={case_id}", "--case-type={case_type}", "--layer=macro", "--unit-id=whole"]
 
+- id: extract_claims_draft
+  description: DeepSeek-extract author claims from the macro unit. Front-loaded so chapter/section reviews can target specific claims.
+  needs: [units/macro/whole.md]
+  produces: [evidence/claims_draft.json]
+  command: extract-claims
+  positional: [units/macro/whole.md, evidence/claims_draft.json]
+  flags: ["--case-id={case_id}", "--case-type={case_type}", "--unit-id=whole"]
+
 - id: deepseek_chapters
-  description: Per-chapter layered review (fanout).
+  description: Per-chapter layered review (fanout). Grounded in evidence/claims_draft.json.
   fanout_pattern: units/chapters/chapter_*.md
   produces_template: reviews/deepseek/chapters/{stem}.json
   command: deepseek-review-unit
   positional_template: ["{unit}", "{output}"]
-  flags_template: ["--case-id={case_id}", "--case-type={case_type}", "--layer=chapter", "--unit-id={stem}"]
+  flags_template: ["--case-id={case_id}", "--case-type={case_type}", "--layer=chapter", "--unit-id={stem}", "--claims=evidence/claims_draft.json"]
 
 - id: deepseek_sections
-  description: Per-section local review (fanout). Filtered by units/risk.json so only high-risk sections cost API calls.
+  description: Per-section local review (fanout). Filtered by units/risk.json; grounded in claims_draft.
   fanout_pattern: units/sections/section_*.md
   risk_threshold: 30.0
   risk_table: units/risk.json
   produces_template: reviews/deepseek/sections/{stem}.json
   command: deepseek-review-unit
   positional_template: ["{unit}", "{output}"]
-  flags_template: ["--case-id={case_id}", "--case-type={case_type}", "--layer=section", "--unit-id={stem}"]
+  flags_template: ["--case-id={case_id}", "--case-type={case_type}", "--layer=section", "--unit-id={stem}", "--claims=evidence/claims_draft.json"]
 
 - id: aggregate
   description: Aggregate per-unit reviews into reviews/issue_graph.json.
@@ -74,16 +90,8 @@ stages:
   positional: [reviews/deepseek, reviews/issue_graph.json]
   flags: ["--case-id={case_id}"]
 
-- id: extract_claims_draft
-  description: DeepSeek-extract author claims from the macro unit into evidence/claims_draft.json.
-  needs: [units/macro/whole.md]
-  produces: [evidence/claims_draft.json]
-  command: extract-claims
-  positional: [units/macro/whole.md, evidence/claims_draft.json]
-  flags: ["--case-id={case_id}", "--case-type={case_type}", "--unit-id=whole"]
-
 - id: claim_matrix_review
-  description: Human edits evidence/claims_draft.json into the canonical evidence/claim_evidence_matrix.json.
+  description: Human refines evidence/claims_draft.json into evidence/claim_evidence_matrix.json.
   needs: [evidence/claims_draft.json]
   produces: [evidence/claim_evidence_matrix.json]
   gate: human
@@ -113,12 +121,12 @@ stages:
   flags: ["--claim-matrix=evidence/claim_evidence_matrix.json"]
 
 - id: meta_review_issues
-  description: Strong-model meta-review — cross-anchor dedup, severity recalibration, macro re-contextualization, track assignment. Produces reviews/meta_review.md and comments/review_comments.meta.json (a meta-reviewed candidate set, not the final author version).
-  needs: [reviews/issue_graph.json, comments/review_comments.draft.json]
+  description: Strong-model meta-review anchored on paper_shape — cross-anchor dedup, severity recalibration, revision_priority assignment, track assignment, macro re-contextualization.
+  needs: [reviews/issue_graph.json, comments/review_comments.draft.json, reviews/paper_shape.md]
   produces: [reviews/meta_review.md, comments/review_comments.meta.json]
   command: meta-review-issues
   positional: [reviews/issue_graph.json, reviews/meta_review.md, comments/review_comments.meta.json]
-  flags: ["--draft=comments/review_comments.draft.json", "--claim-matrix=evidence/claim_evidence_matrix.json", "--units-root=units"]
+  flags: ["--draft=comments/review_comments.draft.json", "--claim-matrix=evidence/claim_evidence_matrix.json", "--paper-shape=reviews/paper_shape.md", "--units-root=units"]
 
 - id: dissent
   description: Adversarial dissent. thesis_undergrad uses the intensified prompt to counter examiner default-pass.
@@ -139,14 +147,23 @@ stages:
   needs: [comments/review_comments.meta.json]
   produces: [comments/review_comments.json]
   gate: human
-  instruction: Copy comments/review_comments.meta.json to comments/review_comments.json, then refine. The strong-model meta-review has already merged duplicates, recalibrated severity, and assigned tracks. Trim further, sharpen wording, and align with dissent and integrity findings before rendering for the author.
+  instruction: Copy comments/review_comments.meta.json to comments/review_comments.json, then refine. The strong-model meta-review has already merged duplicates, recalibrated severity, assigned revision_priority and tracks, and anchored against paper_shape.md. Trim further, sharpen wording, and align with dissent and integrity findings before rendering for the author.
 
 - id: render_author_comments
-  description: Render the page/line-anchored Markdown the author sees.
+  description: Render the author-direct view — clean, sorted by revision_priority, no provenance, paper_shape embedded.
   needs: [comments/review_comments.json, provenance/source_map.jsonl]
   produces: [comments/author_facing_comments.md]
   command: render-comments
   positional: [comments/review_comments.json, provenance/source_map.jsonl, comments/author_facing_comments.md]
+  flags: ["--mode=author", "--paper-shape=reviews/paper_shape.md"]
+
+- id: render_supervisor_comments
+  description: Render the supervisor-internal view — full traceability with ISS/CLM provenance, both severity and priority labels, paper_shape embedded.
+  needs: [comments/review_comments.json, provenance/source_map.jsonl]
+  produces: [comments/supervisor_internal.md]
+  command: render-comments
+  positional: [comments/review_comments.json, provenance/source_map.jsonl, comments/supervisor_internal.md]
+  flags: ["--mode=supervisor", "--paper-shape=reviews/paper_shape.md"]
 
 - id: editorial_decision
   description: Final human-owned editorial judgment.

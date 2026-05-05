@@ -48,12 +48,13 @@ class Issue:
     dimension: str
     type: str
     proposed_severity: str
-    confirmed_severity: str = ""
+    final_severity: str = ""
     status: str = "raised"
     evidence_quote: str = ""
     diagnosis: str = ""
     recommendation: str = ""
     triggered_check_ids: list[str] = field(default_factory=list)
+    targets_claims: list[str] = field(default_factory=list)
     raised_by: list[str] = field(default_factory=list)
     merged_into: str | None = None
     merge_children: list[str] = field(default_factory=list)
@@ -89,6 +90,7 @@ def aggregate(deepseek_dir: Path, output_path: Path, case_id: str = "") -> dict:
                     diagnosis=str(raw.get("diagnosis", "")),
                     recommendation=str(raw.get("recommendation", "")),
                     triggered_check_ids=_as_str_list(raw.get("triggered_check_ids")),
+                    targets_claims=_as_str_list(raw.get("targets_claims")),
                     raised_by=[raised_by],
                     needs_human_check=bool(raw.get("needs_human_check", False)),
                 )

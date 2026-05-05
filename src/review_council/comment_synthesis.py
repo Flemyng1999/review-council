@@ -22,6 +22,24 @@ from pathlib import Path
 
 SEVERITY_ORDER = {"blocking": 0, "major": 1, "moderate": 2, "minor": 3}
 DEFAULT_KEEP = ("blocking", "major", "moderate")
+PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def _default_priority_from_severity(severity: str, dimension: str = "", issue_type: str = "") -> str:
+    """Heuristic mapping for the cheap pre-pass.
+
+    Real revision_priority is set by the strong-model meta-review. This is
+    only the cheap default so the draft has a sortable field.
+    """
+    if severity == "blocking":
+        return "high"
+    if severity == "major":
+        if issue_type in {"citation", "format"}:
+            return "low"
+        return "high"
+    if severity == "moderate":
+        return "medium"
+    return "low"
 
 # Hard caps applied before clustering and severity-based filtering.
 # These exist because cheap reviewers (DeepSeek) tend to inflate severity
@@ -40,7 +58,7 @@ SEVERITY_CAPS: tuple[tuple[str, str, str], ...] = (
 def _apply_severity_caps(issue: dict) -> str:
     """Return the capped severity for an issue. Pure function over (dim, type, sev)."""
 
-    raw = issue.get("confirmed_severity") or issue.get("proposed_severity") or ""
+    raw = issue.get("final_severity") or issue.get("proposed_severity") or ""
     dimension = str(issue.get("dimension", "")).strip().lower()
     issue_type = str(issue.get("type", "")).strip().lower()
     cap_order = SEVERITY_ORDER.get(raw, 99)
@@ -103,10 +121,16 @@ def synthesize_comments(
         issue = issue_by_id[issue_id]
         anchor = issue.get("anchor") or {}
         siblings = list(cluster_of.get(issue_id, (issue_id,)))
+        sev = capped_severity.get(issue_id, issue.get("proposed_severity", ""))
         comments.append(
             {
                 "id": f"CMT-{index:04d}",
-                "severity": capped_severity.get(issue_id, issue.get("proposed_severity", "")),
+                "final_severity": sev,
+                "revision_priority": _default_priority_from_severity(
+                    sev,
+                    str(issue.get("dimension", "")),
+                    str(issue.get("type", "")),
+                ),
                 "anchor_id": "",
                 "page": anchor.get("page"),
                 "line_start": anchor.get("line_start"),
