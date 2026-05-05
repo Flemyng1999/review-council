@@ -102,12 +102,20 @@ stages:
   flags: ["--issue-graph=reviews/issue_graph.json"]
 
 - id: synthesize_comments_draft
-  description: Auto-synthesize a draft review_comments.draft.json from issue_graph plus claim links.
+  description: Cheap pre-pass — cluster + severity-cap filter on issue_graph.
   needs: [reviews/issue_graph.json]
   produces: [comments/review_comments.draft.json]
   command: synthesize-comments
   positional: [reviews/issue_graph.json, comments/review_comments.draft.json]
   flags: ["--claim-matrix=evidence/claim_evidence_matrix.json"]
+
+- id: meta_review_issues
+  description: Strong-model meta-review — cross-anchor dedup, severity recalibration, track assignment.
+  needs: [reviews/issue_graph.json, comments/review_comments.draft.json]
+  produces: [reviews/meta_review.md, comments/review_comments.meta.json]
+  command: meta-review-issues
+  positional: [reviews/issue_graph.json, reviews/meta_review.md, comments/review_comments.meta.json]
+  flags: ["--draft=comments/review_comments.draft.json", "--claim-matrix=evidence/claim_evidence_matrix.json"]
 
 - id: dissent
   description: Journal dissent — argue against the emerging accept consensus.
@@ -124,11 +132,11 @@ stages:
   instruction: Run templates/prompts/integrity_check.md. Confirm AI tool disclosure, COI declarations, and data licensing.
 
 - id: review_comments_human_edit
-  description: Refine the synthesized draft into the canonical comments/review_comments.json.
-  needs: [comments/review_comments.draft.json]
+  description: Human refines comments/review_comments.meta.json into the canonical comments/review_comments.json.
+  needs: [comments/review_comments.meta.json]
   produces: [comments/review_comments.json]
   gate: human
-  instruction: Refine comments/review_comments.draft.json into comments/review_comments.json. Tighten wording, merge redundant entries, align severity with dissent.
+  instruction: Copy comments/review_comments.meta.json to comments/review_comments.json, then refine. Meta-review has already deduped and recalibrated; trim further and align with dissent.
 
 - id: render_author_comments
   description: Render author-facing Markdown.

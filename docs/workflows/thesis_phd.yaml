@@ -96,12 +96,20 @@ stages:
   flags: ["--issue-graph=reviews/issue_graph.json"]
 
 - id: synthesize_comments_draft
-  description: Auto-synthesize a draft review_comments.draft.json from issue_graph plus claim links.
+  description: Cheap pre-pass — cluster + severity-cap filter on issue_graph.
   needs: [reviews/issue_graph.json]
   produces: [comments/review_comments.draft.json]
   command: synthesize-comments
   positional: [reviews/issue_graph.json, comments/review_comments.draft.json]
   flags: ["--claim-matrix=evidence/claim_evidence_matrix.json"]
+
+- id: meta_review_issues
+  description: Strong-model meta-review — cross-anchor dedup, severity recalibration, track assignment.
+  needs: [reviews/issue_graph.json, comments/review_comments.draft.json]
+  produces: [reviews/meta_review.md, comments/review_comments.meta.json]
+  command: meta-review-issues
+  positional: [reviews/issue_graph.json, reviews/meta_review.md, comments/review_comments.meta.json]
+  flags: ["--draft=comments/review_comments.draft.json", "--claim-matrix=evidence/claim_evidence_matrix.json"]
 
 - id: dissent
   needs: [reviews/issue_graph.json]
@@ -129,10 +137,10 @@ stages:
   instruction: Chair records candidate's autonomy and ability to defend choices in defense. AI must not generate this file.
 
 - id: review_comments_human_edit
-  needs: [comments/review_comments.draft.json]
+  needs: [comments/review_comments.meta.json]
   produces: [comments/review_comments.json]
   gate: human
-  instruction: Refine comments/review_comments.draft.json into comments/review_comments.json. Align with dissent, integrity, foundations, and chair voice.
+  instruction: Copy comments/review_comments.meta.json to comments/review_comments.json, then refine. Trim further, align with dissent, integrity, foundations, and chair voice.
 
 - id: render_author_comments
   needs: [comments/review_comments.json, provenance/source_map.jsonl]

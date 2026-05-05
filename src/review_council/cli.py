@@ -18,6 +18,7 @@ from review_council.comment_synthesis import DEFAULT_KEEP, synthesize_comments
 from review_council.config import get_config_value
 from review_council.freeze import freeze_docx_to_pdf
 from review_council.issue_graph import aggregate as aggregate_issue_graph
+from review_council.meta_review import META_DEFAULT_MODEL, run_meta_review
 from review_council.prompts import render_prompt_template
 from review_council.provenance import build_markdown_line_map
 from review_council.provenance_pdf import build_pdf_page_map
@@ -105,6 +106,18 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.add_argument("deepseek_dir", type=Path, help="cases/<case-id>/reviews/deepseek")
     aggregate.add_argument("output_path", type=Path, help="cases/<case-id>/reviews/issue_graph.json")
     aggregate.add_argument("--case-id", default="")
+
+    meta_review = subparsers.add_parser("meta-review-issues", help="Strong-model meta-review of an issue graph (cross-anchor dedup, severity recalibration, track assignment)")
+    meta_review.add_argument("issue_graph_path", type=Path)
+    meta_review.add_argument("output_review_md", type=Path)
+    meta_review.add_argument("output_comments_json", type=Path)
+    meta_review.add_argument("--draft", type=Path, default=None, help="comments/review_comments.draft.json")
+    meta_review.add_argument("--claim-matrix", type=Path, default=None, help="evidence/claim_evidence_matrix.json")
+    meta_review.add_argument("--template", type=Path, default=Path("templates/prompts/meta_reviewer.md"))
+    meta_review.add_argument("--config", type=Path, default=Path("config/secrets.local.env"))
+    meta_review.add_argument("--model", default=META_DEFAULT_MODEL)
+    meta_review.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    meta_review.add_argument("--top-n", type=int, default=80, help="Send the top-N severity-sorted issues to the strong model")
 
     synthesize = subparsers.add_parser("synthesize-comments", help="Synthesize a draft review_comments.json from reviews/issue_graph.json")
     synthesize.add_argument("issue_graph_path", type=Path, help="reviews/issue_graph.json")
@@ -206,6 +219,29 @@ def main(argv: list[str] | None = None) -> int:
         rubrics_dir = args.rubrics_dir or (repo_root() / "rubrics")
         rubrics = select_rubrics(rubrics_dir, args.case_type, _layer_alias(args.layer))
         print(render_checks_block(rubrics) or "(no applicable rubrics)")
+        return 0
+
+    if args.command == "meta-review-issues":
+        api_key = get_config_value("DEEPSEEK_API_KEY", args.config)
+        if not api_key:
+            print("ERROR: DEEPSEEK_API_KEY is missing from environment or local config")
+            return 1
+        stats = run_meta_review(
+            issue_graph_path=args.issue_graph_path,
+            output_review_md=args.output_review_md,
+            output_comments_json=args.output_comments_json,
+            prompt_template=args.template,
+            api_key=api_key,
+            draft_path=args.draft,
+            claim_matrix_path=args.claim_matrix,
+            model=args.model,
+            base_url=args.base_url,
+            top_n_issues=args.top_n,
+        )
+        print(
+            f"{stats['output_comments']} comments from {stats['considered_issues']} considered issues "
+            f"(of {stats['input_issues']}) -> {stats['comments_json']}"
+        )
         return 0
 
     if args.command == "synthesize-comments":

@@ -27,7 +27,8 @@ from review_council.claim_evidence import (
     render_claim_matrix_md,
     save_claim_matrix,
 )
-from review_council.comment_synthesis import synthesize_comments
+from review_council.comment_synthesis import _apply_severity_caps, synthesize_comments
+from review_council.meta_review import split_meta_review_response
 from review_council.runner import load_workflow, run_workflow
 from review_council.segment.risk import (
     compute_risk_table,
@@ -659,6 +660,73 @@ def test_synthesize_comments_severity_filter_and_dedup(tmp_path: Path) -> None:
     assert stats["input_issues"] == 5
     moderate = next(c for c in comments if c["severity"] == "moderate")
     assert sorted(moderate["derived_from_issues"]) == ["ISS-0003", "ISS-0004"]
+
+
+def test_severity_caps_demote_citation_and_format() -> None:
+    citation_major = {"proposed_severity": "major", "type": "citation", "dimension": "integrity"}
+    format_major = {"proposed_severity": "major", "type": "format", "dimension": "clarity"}
+    method_major = {"proposed_severity": "major", "type": "method", "dimension": "methodology"}
+
+    assert _apply_severity_caps(citation_major) == "minor"
+    assert _apply_severity_caps(format_major) == "minor"
+    assert _apply_severity_caps(method_major) == "major"
+
+
+def test_split_meta_review_response_parses_two_sections() -> None:
+    text = """## Meta-Review Narrative
+
+Summary paragraph.
+
+```json
+[{"id": "CMT-0001", "track": "main_argument", "severity": "major"}]
+```
+"""
+    narrative, comments_json = split_meta_review_response(text)
+    assert narrative.startswith("## Meta-Review Narrative")
+    assert "Summary paragraph." in narrative
+    parsed = json.loads(comments_json)
+    assert parsed[0]["id"] == "CMT-0001"
+    assert parsed[0]["track"] == "main_argument"
+
+
+def test_render_comments_groups_by_track(tmp_path: Path) -> None:
+    manuscript = tmp_path / "manuscript.md"
+    source_map = tmp_path / "source_map.jsonl"
+    comments = tmp_path / "comments.json"
+    output = tmp_path / "out.md"
+
+    manuscript.write_text("# T\n\nbody\n", encoding="utf-8")
+    build_markdown_line_map(manuscript, source_map)
+    comments.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "CMT-001",
+                    "track": "methods",
+                    "severity": "major",
+                    "comment": "Method issue text.",
+                    "anchor_id": "L00003",
+                },
+                {
+                    "id": "CMT-002",
+                    "track": "main_argument",
+                    "severity": "blocking",
+                    "comment": "Main argument issue text.",
+                    "anchor_id": "L00003",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    from review_council.comments import render_comments as render
+
+    render(comments, source_map, output)
+    rendered = output.read_text(encoding="utf-8")
+
+    main_pos = rendered.find("## Main Argument")
+    methods_pos = rendered.find("## Methods")
+    assert 0 <= main_pos < methods_pos
 
 
 def test_dimensions_taxonomy_is_stable() -> None:
