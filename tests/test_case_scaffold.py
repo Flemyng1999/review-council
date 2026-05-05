@@ -729,6 +729,63 @@ def test_render_comments_groups_by_track(tmp_path: Path) -> None:
     assert 0 <= main_pos < methods_pos
 
 
+def test_render_comments_hides_provenance_by_default(tmp_path: Path) -> None:
+    source_map = tmp_path / "source_map.jsonl"
+    source_map.write_text("", encoding="utf-8")
+    comments = tmp_path / "comments.json"
+    comments.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "C-1",
+                    "comment": "x",
+                    "line_start": 10,
+                    "derived_from_issues": ["ISS-0007"],
+                    "linked_claims": ["CLM-0003"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "out.md"
+    from review_council.comments import render_comments as render
+
+    render(comments, source_map, output)
+    rendered = output.read_text(encoding="utf-8")
+    assert "Provenance" not in rendered
+    assert "ISS-0007" not in rendered
+
+    render(comments, source_map, output, show_provenance=True)
+    rendered = output.read_text(encoding="utf-8")
+    assert "Provenance" in rendered
+    assert "ISS-0007" in rendered
+
+
+def test_backfill_prefers_section_over_chapter_over_macro(tmp_path: Path) -> None:
+    units_root = tmp_path / "units"
+    (units_root / "macro").mkdir(parents=True)
+    (units_root / "chapters").mkdir(parents=True)
+    (units_root / "sections").mkdir(parents=True)
+    (units_root / "macro" / "whole.md").write_text(
+        "---\nnormalized_line_start: 1\n---\nx\n", encoding="utf-8"
+    )
+    (units_root / "chapters" / "chapter_05.md").write_text(
+        "---\nnormalized_line_start: 800\n---\nx\n", encoding="utf-8"
+    )
+    (units_root / "sections" / "section_15.md").write_text(
+        "---\nnormalized_line_start: 855\n---\nx\n", encoding="utf-8"
+    )
+
+    issues = [
+        {"id": "ISS-A", "anchor": {}, "source_units": ["macro/whole", "chapters/chapter_05", "sections/section_15"]},
+    ]
+    comments = [{"id": "C", "page": None, "line_start": None, "derived_from_issues": ["ISS-A"]}]
+
+    backfill_anchors(comments, issues, units_root=units_root)
+
+    assert comments[0]["line_start"] == 855
+
+
 def test_backfill_anchors_uses_issue_anchor_then_unit_start(tmp_path: Path) -> None:
     units_root = tmp_path / "units"
     (units_root / "chapters").mkdir(parents=True)

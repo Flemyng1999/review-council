@@ -76,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("comments_path", type=Path)
     render.add_argument("source_map_path", type=Path)
     render.add_argument("output_path", type=Path)
+    render.add_argument("--show-provenance", action="store_true", help="Include ISS/CLM provenance lines (internal view; off by default for author view)")
 
     deepseek_review = subparsers.add_parser("deepseek-review-unit", help="Run a DeepSeek layered review prompt on one text unit")
     deepseek_review.add_argument("unit_path", type=Path)
@@ -217,7 +218,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "render-comments":
-        render_comments(args.comments_path, args.source_map_path, args.output_path)
+        render_comments(
+            args.comments_path,
+            args.source_map_path,
+            args.output_path,
+            show_provenance=args.show_provenance,
+        )
         print(args.output_path)
         return 0
 

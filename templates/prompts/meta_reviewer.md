@@ -59,8 +59,19 @@ Apply these transformations:
 - Do not recommend changes that go beyond what the supplied issues support.
 - Each output comment must include `derived_from_issues` (the ISS ids it
   came from) and, when applicable, `linked_claims` (CLM ids).
-- Do not exceed 20 author-facing comments unless issue density truly
-  justifies it.
+- **Single focus per comment**: each comment addresses ONE operational
+  fix. Do not bundle unrelated micro-issues (units, BRDF, baselines,
+  citations) into one major comment. If several unrelated minor items
+  remain, list them in a single trailing `references_format` comment as
+  a brief checklist, not as separate majors.
+- **Target 12 to 15 comments**, not 20. Aim for the smallest number that
+  preserves the strongest findings.
+- **Tone calibration by case_type**:
+  - `thesis_undergrad`: mentor-style, restrained. Phrase recommendations
+    as concrete, executable next steps for an undergraduate ("说明为什么
+    选择 N，而不是只把它作为模型参数出现"). Avoid graduate-level
+    imperatives ("证明 N 的不可替代性") unless evidence warrants it.
+  - `journal`, `thesis_master`, `thesis_phd`: standard reviewer tone.
 
 [格式]
 Return TWO sections in this exact order. Output ONLY these two sections,

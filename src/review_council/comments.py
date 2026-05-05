@@ -33,16 +33,22 @@ TRACK_LABELS = {
 }
 
 
-def render_comments(comments_path: Path, source_map_path: Path, output_path: Path) -> None:
+def render_comments(
+    comments_path: Path,
+    source_map_path: Path,
+    output_path: Path,
+    *,
+    show_provenance: bool = False,
+) -> None:
     comments = json.loads(comments_path.read_text(encoding="utf-8"))
     source_map = load_source_map(source_map_path)
     line_to_page = _build_line_to_page_index(source_map)
 
     has_tracks = any(c.get("track") for c in comments)
     if has_tracks:
-        text = _render_grouped(comments, source_map, line_to_page)
+        text = _render_grouped(comments, source_map, line_to_page, show_provenance)
     else:
-        text = _render_flat(comments, source_map, line_to_page)
+        text = _render_flat(comments, source_map, line_to_page, show_provenance)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text, encoding="utf-8")
@@ -82,18 +88,28 @@ def _resolve_page_by_line(line_to_page: list[tuple[int, int]], line: int | None)
     return line_to_page[pos][1]
 
 
-def _render_flat(comments: list[dict], source_map: dict, line_to_page: list[tuple[int, int]]) -> str:
+def _render_flat(
+    comments: list[dict],
+    source_map: dict,
+    line_to_page: list[tuple[int, int]],
+    show_provenance: bool,
+) -> str:
     lines = ["# Author-Facing Review Comments", ""]
     counter = 0
     for comment in comments:
         if not comment.get("comment"):
             continue
         counter += 1
-        lines.extend(_format_comment_block(counter, comment, source_map, line_to_page))
+        lines.extend(_format_comment_block(counter, comment, source_map, line_to_page, show_provenance))
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _render_grouped(comments: list[dict], source_map: dict, line_to_page: list[tuple[int, int]]) -> str:
+def _render_grouped(
+    comments: list[dict],
+    source_map: dict,
+    line_to_page: list[tuple[int, int]],
+    show_provenance: bool,
+) -> str:
     by_track: dict[str, list[dict]] = {}
     for comment in comments:
         if not comment.get("comment"):
@@ -113,7 +129,7 @@ def _render_grouped(comments: list[dict], source_map: dict, line_to_page: list[t
         lines.append("")
         for comment in bucket:
             counter += 1
-            lines.extend(_format_comment_block(counter, comment, source_map, line_to_page))
+            lines.extend(_format_comment_block(counter, comment, source_map, line_to_page, show_provenance))
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -122,6 +138,7 @@ def _format_comment_block(
     comment: dict,
     source_map: dict,
     line_to_page: list[tuple[int, int]],
+    show_provenance: bool,
 ) -> list[str]:
     anchor = source_map.get(str(comment.get("anchor_id", "")), {})
     line_start = comment.get("line_start") or anchor.get("source_line_start") or anchor.get("normalized_line_start")
@@ -142,15 +159,16 @@ def _format_comment_block(
     recommendation = comment.get("recommendation")
     if recommendation:
         out.extend([f"Recommendation: {recommendation}", ""])
-    derived = comment.get("derived_from_issues") or []
-    linked = comment.get("linked_claims") or []
-    if derived or linked:
-        provenance: list[str] = []
-        if derived:
-            provenance.append("from " + ", ".join(derived))
-        if linked:
-            provenance.append("claims " + ", ".join(linked))
-        out.extend([f"_Provenance: {' · '.join(provenance)}_", ""])
+    if show_provenance:
+        derived = comment.get("derived_from_issues") or []
+        linked = comment.get("linked_claims") or []
+        if derived or linked:
+            provenance: list[str] = []
+            if derived:
+                provenance.append("from " + ", ".join(derived))
+            if linked:
+                provenance.append("claims " + ", ".join(linked))
+            out.extend([f"_Provenance: {' · '.join(provenance)}_", ""])
     return out
 
 

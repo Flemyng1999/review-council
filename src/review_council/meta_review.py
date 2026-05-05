@@ -18,6 +18,7 @@ starting frame; this stage is the one that produces author-version quality.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from review_council.prompts import render_prompt_template
@@ -119,11 +120,17 @@ def backfill_anchors(
     *,
     units_root: Path | None = None,
 ) -> int:
-    """For each comment with null line/page, copy from the first available ISS anchor.
+    """Fill missing line/page anchors using the most specific source available.
 
-    Falls back to the source_unit's normalized_line_start when the ISS itself has
-    no specific anchor (chapter-level reviews often have no line anchor).
-    Returns the number of comments enriched.
+    Specificity order, best to worst:
+      1. issue carries an explicit `anchor.line_start` (DeepSeek pinpointed a line)
+      2. issue's source_unit is a section
+      3. issue's source_unit is a chapter
+      4. issue's source_unit is macro/whole (line=1, uninformative — last resort)
+
+    For each comment we scan every ISS in `derived_from_issues` and pick the
+    best candidate; ties prefer earlier order in the list (the model's first
+    citation tends to be its primary anchor).
     """
 
     issue_index = {issue.get("id"): issue for issue in issues if issue.get("id")}
@@ -133,29 +140,65 @@ def backfill_anchors(
     for comment in comments:
         if comment.get("line_start") and comment.get("page"):
             continue
-        for issue_id in comment.get("derived_from_issues") or []:
-            issue = issue_index.get(issue_id)
-            if not issue:
-                continue
-            anchor = issue.get("anchor") or {}
-            line_start = anchor.get("line_start")
-            line_end = anchor.get("line_end")
-            page = anchor.get("page")
-            if line_start is None:
-                for unit_id in issue.get("source_units") or []:
-                    if unit_id in unit_starts:
-                        line_start = unit_starts[unit_id]
-                        break
-            if comment.get("line_start") is None and line_start is not None:
-                comment["line_start"] = line_start
-                if comment.get("line_end") is None:
-                    comment["line_end"] = line_end or line_start
-                enriched += 1
-            if comment.get("page") is None and page is not None:
-                comment["page"] = page
-            if comment.get("line_start") and comment.get("page"):
-                break
+        candidates = _candidates_for_comment(comment, issue_index, unit_starts)
+        if not candidates:
+            continue
+        best = candidates[0]
+        if comment.get("line_start") is None and best.line_start is not None:
+            comment["line_start"] = best.line_start
+            if comment.get("line_end") is None:
+                comment["line_end"] = best.line_end or best.line_start
+            enriched += 1
+        if comment.get("page") is None and best.page is not None:
+            comment["page"] = best.page
     return enriched
+
+
+@dataclass
+class _AnchorCandidate:
+    line_start: int | None
+    line_end: int | None
+    page: int | None
+    specificity: int  # smaller is better
+    order: int
+
+
+def _candidates_for_comment(
+    comment: dict,
+    issue_index: dict[str, dict],
+    unit_starts: dict[str, int],
+) -> list["_AnchorCandidate"]:
+    candidates: list[_AnchorCandidate] = []
+    for order, issue_id in enumerate(comment.get("derived_from_issues") or []):
+        issue = issue_index.get(issue_id)
+        if not issue:
+            continue
+        anchor = issue.get("anchor") or {}
+        line_start = anchor.get("line_start")
+        line_end = anchor.get("line_end")
+        page = anchor.get("page")
+        if line_start is not None:
+            candidates.append(_AnchorCandidate(line_start, line_end, page, 0, order))
+            continue
+        for unit_id in issue.get("source_units") or []:
+            if unit_id not in unit_starts:
+                continue
+            specificity = (
+                1 if unit_id.startswith("section") or unit_id.startswith("sections/") else
+                2 if unit_id.startswith("chapter") or unit_id.startswith("chapters/") else
+                3
+            )
+            candidates.append(
+                _AnchorCandidate(
+                    line_start=unit_starts[unit_id],
+                    line_end=None,
+                    page=page,
+                    specificity=specificity,
+                    order=order,
+                )
+            )
+    candidates.sort(key=lambda c: (c.specificity, c.order))
+    return candidates
 
 
 def _index_unit_starts(units_root: Path) -> dict[str, int]:
