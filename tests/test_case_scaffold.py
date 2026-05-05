@@ -28,7 +28,7 @@ from review_council.claim_evidence import (
     save_claim_matrix,
 )
 from review_council.comment_synthesis import _apply_severity_caps, synthesize_comments
-from review_council.meta_review import split_meta_review_response
+from review_council.meta_review import backfill_anchors, split_meta_review_response
 from review_council.runner import load_workflow, run_workflow
 from review_council.segment.risk import (
     compute_risk_table,
@@ -727,6 +727,65 @@ def test_render_comments_groups_by_track(tmp_path: Path) -> None:
     main_pos = rendered.find("## Main Argument")
     methods_pos = rendered.find("## Methods")
     assert 0 <= main_pos < methods_pos
+
+
+def test_backfill_anchors_uses_issue_anchor_then_unit_start(tmp_path: Path) -> None:
+    units_root = tmp_path / "units"
+    (units_root / "chapters").mkdir(parents=True)
+    (units_root / "chapters" / "chapter_02.md").write_text(
+        "---\nunit_id: chapter_02\ntitle: Materials\nnormalized_line_start: 320\nnormalized_line_end: 480\n---\nbody\n",
+        encoding="utf-8",
+    )
+    issues = [
+        {
+            "id": "ISS-A",
+            "anchor": {"page": 12, "line_start": 350, "line_end": 360},
+            "source_units": ["chapters/chapter_02"],
+        },
+        {
+            "id": "ISS-B",
+            "anchor": {"page": None, "line_start": None, "line_end": None},
+            "source_units": ["chapters/chapter_02"],
+        },
+    ]
+    comments = [
+        {"id": "CMT-1", "page": None, "line_start": None, "derived_from_issues": ["ISS-A"]},
+        {"id": "CMT-2", "page": None, "line_start": None, "derived_from_issues": ["ISS-B"]},
+    ]
+
+    backfilled = backfill_anchors(comments, issues, units_root=units_root)
+
+    assert backfilled == 2
+    assert comments[0]["page"] == 12
+    assert comments[0]["line_start"] == 350
+    assert comments[1]["line_start"] == 320
+    assert comments[1]["page"] is None
+
+
+def test_render_comments_resolves_page_from_line(tmp_path: Path) -> None:
+    source_map = tmp_path / "source_map.jsonl"
+    source_map.write_text(
+        "\n".join(
+            [
+                '{"anchor_id": "L00100", "normalized_path": "x.md", "normalized_line_start": 100, "normalized_line_end": 100, "source_path": "x.pdf", "source_page": 5, "source_line_start": null, "source_line_end": null, "text": ""}',
+                '{"anchor_id": "L00200", "normalized_path": "x.md", "normalized_line_start": 200, "normalized_line_end": 200, "source_path": "x.pdf", "source_page": 9, "source_line_start": null, "source_line_end": null, "text": ""}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    comments = tmp_path / "comments.json"
+    comments.write_text(
+        json.dumps([{"id": "C-1", "comment": "x", "line_start": 150, "line_end": 150}]),
+        encoding="utf-8",
+    )
+    output = tmp_path / "out.md"
+
+    from review_council.comments import render_comments as render
+
+    render(comments, source_map, output)
+    rendered = output.read_text(encoding="utf-8")
+    assert "p. 5" in rendered
 
 
 def test_dimensions_taxonomy_is_stable() -> None:

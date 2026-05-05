@@ -108,7 +108,7 @@ stages:
   produces: [reviews/meta_review.md, comments/review_comments.meta.json]
   command: meta-review-issues
   positional: [reviews/issue_graph.json, reviews/meta_review.md, comments/review_comments.meta.json]
-  flags: ["--draft=comments/review_comments.draft.json", "--claim-matrix=evidence/claim_evidence_matrix.json"]
+  flags: ["--draft=comments/review_comments.draft.json", "--claim-matrix=evidence/claim_evidence_matrix.json", "--units-root=units"]
 
 - id: dissent
   needs: [reviews/issue_graph.json]

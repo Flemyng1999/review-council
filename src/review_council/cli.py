@@ -18,7 +18,7 @@ from review_council.comment_synthesis import DEFAULT_KEEP, synthesize_comments
 from review_council.config import get_config_value
 from review_council.freeze import freeze_docx_to_pdf
 from review_council.issue_graph import aggregate as aggregate_issue_graph
-from review_council.meta_review import META_DEFAULT_MODEL, run_meta_review
+from review_council.meta_review import META_DEFAULT_MODEL, backfill_anchors, run_meta_review
 from review_council.prompts import render_prompt_template
 from review_council.provenance import build_markdown_line_map
 from review_council.provenance_pdf import build_pdf_page_map
@@ -118,6 +118,12 @@ def build_parser() -> argparse.ArgumentParser:
     meta_review.add_argument("--model", default=META_DEFAULT_MODEL)
     meta_review.add_argument("--base-url", default=DEFAULT_BASE_URL)
     meta_review.add_argument("--top-n", type=int, default=80, help="Send the top-N severity-sorted issues to the strong model")
+    meta_review.add_argument("--units-root", type=Path, default=None, help="Optional units/ root for chapter-level anchor backfill")
+
+    backfill = subparsers.add_parser("backfill-comment-anchors", help="Fill missing line/page anchors in a comments JSON from issue_graph + units")
+    backfill.add_argument("comments_path", type=Path)
+    backfill.add_argument("issue_graph_path", type=Path)
+    backfill.add_argument("--units-root", type=Path, default=None)
 
     synthesize = subparsers.add_parser("synthesize-comments", help="Synthesize a draft review_comments.json from reviews/issue_graph.json")
     synthesize.add_argument("issue_graph_path", type=Path, help="reviews/issue_graph.json")
@@ -234,14 +240,29 @@ def main(argv: list[str] | None = None) -> int:
             api_key=api_key,
             draft_path=args.draft,
             claim_matrix_path=args.claim_matrix,
+            units_root=args.units_root,
             model=args.model,
             base_url=args.base_url,
             top_n_issues=args.top_n,
         )
         print(
             f"{stats['output_comments']} comments from {stats['considered_issues']} considered issues "
-            f"(of {stats['input_issues']}) -> {stats['comments_json']}"
+            f"(of {stats['input_issues']}); {stats['anchors_backfilled']} anchors backfilled "
+            f"-> {stats['comments_json']}"
         )
+        return 0
+
+    if args.command == "backfill-comment-anchors":
+        import json as _json
+
+        comments = _json.loads(args.comments_path.read_text(encoding="utf-8"))
+        graph = _json.loads(args.issue_graph_path.read_text(encoding="utf-8"))
+        issues = graph.get("issues", []) if isinstance(graph, dict) else []
+        n = backfill_anchors(comments, issues, units_root=args.units_root)
+        args.comments_path.write_text(
+            _json.dumps(comments, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        print(f"{n} anchors backfilled in {args.comments_path}")
         return 0
 
     if args.command == "synthesize-comments":

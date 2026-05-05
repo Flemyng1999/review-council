@@ -36,29 +36,64 @@ TRACK_LABELS = {
 def render_comments(comments_path: Path, source_map_path: Path, output_path: Path) -> None:
     comments = json.loads(comments_path.read_text(encoding="utf-8"))
     source_map = load_source_map(source_map_path)
+    line_to_page = _build_line_to_page_index(source_map)
 
     has_tracks = any(c.get("track") for c in comments)
     if has_tracks:
-        text = _render_grouped(comments, source_map)
+        text = _render_grouped(comments, source_map, line_to_page)
     else:
-        text = _render_flat(comments, source_map)
+        text = _render_flat(comments, source_map, line_to_page)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text, encoding="utf-8")
 
 
-def _render_flat(comments: list[dict], source_map: dict) -> str:
+def _build_line_to_page_index(source_map: dict[str, dict[str, object]]) -> list[tuple[int, int]]:
+    """Sorted list of (normalized_line_start, source_page) for line-based lookup.
+
+    Used when a comment carries a normalized line but no anchor_id — the
+    renderer scans the index to find the page of the nearest anchor at or
+    before that line.
+    """
+
+    points: list[tuple[int, int]] = []
+    for record in source_map.values():
+        line = record.get("normalized_line_start")
+        page = record.get("source_page")
+        if line is None or page is None:
+            continue
+        try:
+            points.append((int(line), int(page)))
+        except (TypeError, ValueError):
+            continue
+    points.sort()
+    return points
+
+
+def _resolve_page_by_line(line_to_page: list[tuple[int, int]], line: int | None) -> int | None:
+    if line is None or not line_to_page:
+        return None
+    import bisect
+
+    keys = [point[0] for point in line_to_page]
+    pos = bisect.bisect_right(keys, line) - 1
+    if pos < 0:
+        return None
+    return line_to_page[pos][1]
+
+
+def _render_flat(comments: list[dict], source_map: dict, line_to_page: list[tuple[int, int]]) -> str:
     lines = ["# Author-Facing Review Comments", ""]
     counter = 0
     for comment in comments:
         if not comment.get("comment"):
             continue
         counter += 1
-        lines.extend(_format_comment_block(counter, comment, source_map))
+        lines.extend(_format_comment_block(counter, comment, source_map, line_to_page))
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _render_grouped(comments: list[dict], source_map: dict) -> str:
+def _render_grouped(comments: list[dict], source_map: dict, line_to_page: list[tuple[int, int]]) -> str:
     by_track: dict[str, list[dict]] = {}
     for comment in comments:
         if not comment.get("comment"):
@@ -78,15 +113,25 @@ def _render_grouped(comments: list[dict], source_map: dict) -> str:
         lines.append("")
         for comment in bucket:
             counter += 1
-            lines.extend(_format_comment_block(counter, comment, source_map))
+            lines.extend(_format_comment_block(counter, comment, source_map, line_to_page))
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _format_comment_block(counter: int, comment: dict, source_map: dict) -> list[str]:
+def _format_comment_block(
+    counter: int,
+    comment: dict,
+    source_map: dict,
+    line_to_page: list[tuple[int, int]],
+) -> list[str]:
     anchor = source_map.get(str(comment.get("anchor_id", "")), {})
-    page = comment.get("page") or anchor.get("source_page") or anchor.get("page")
     line_start = comment.get("line_start") or anchor.get("source_line_start") or anchor.get("normalized_line_start")
     line_end = comment.get("line_end") or anchor.get("source_line_end") or anchor.get("normalized_line_end")
+    page = (
+        comment.get("page")
+        or anchor.get("source_page")
+        or anchor.get("page")
+        or _resolve_page_by_line(line_to_page, _coerce_int(line_start))
+    )
     location = _format_location(page, line_start, line_end)
 
     out = [f"### {counter}. {comment.get('severity', 'comment').title()} - {location}", ""]
@@ -107,6 +152,15 @@ def _format_comment_block(counter: int, comment: dict, source_map: dict) -> list
             provenance.append("claims " + ", ".join(linked))
         out.extend([f"_Provenance: {' · '.join(provenance)}_", ""])
     return out
+
+
+def _coerce_int(value: object) -> int | None:
+    try:
+        if value in (None, "", "null"):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _format_location(page: object, line_start: object, line_end: object) -> str:
