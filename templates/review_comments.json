@@ -1,0 +1,15 @@
+[
+  {
+    "id": "CMT-001",
+    "severity": "major",
+    "anchor_id": "",
+    "page": null,
+    "line_start": null,
+    "line_end": null,
+    "quote": "",
+    "comment": "",
+    "recommendation": "",
+    "derived_from_issues": [],
+    "linked_claims": []
+  }
+]

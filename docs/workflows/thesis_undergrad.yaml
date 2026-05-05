@@ -1,0 +1,154 @@
+name: thesis_undergrad_review
+case_type: thesis_undergrad
+description: |
+  Layered review for an undergraduate thesis or capstone.
+  Canonical ingestion: source -> frozen/manuscript.pdf -> MinerU -> normalized/manuscript.md.
+  See docs/paper_ingestion_protocol.md.
+
+stages:
+- id: ensure_frozen_pdf
+  description: Ensure frozen/manuscript.pdf exists. DOCX must be exported to PDF from Word; native PDF is copied to frozen/.
+  produces: [frozen/manuscript.pdf]
+  gate: human
+  instruction: |
+    For DOCX source: open in Microsoft Word and export to PDF, then save as frozen/manuscript.pdf.
+    For native PDF source: copy or symlink source/<file>.pdf to frozen/manuscript.pdf.
+    Pandoc DOCX->Markdown is not supported (breaks equations). LibreOffice fallback only when Word is unavailable; document the choice in manifest.yaml.
+
+- id: mineru_extract
+  description: Run MinerU on frozen/manuscript.pdf to produce normalized Markdown and assets.
+  needs: [frozen/manuscript.pdf]
+  produces: [normalized/manuscript.md]
+  gate: human
+  instruction: |
+    On the Linux GPU host (ubuntu-303):
+      cd ~/Code/review-council
+      bash scripts/mineru_case_extract.sh cases/<case-id>/frozen/manuscript.pdf cases/<case-id>
+    See docs/MinerU使用指南.md.
+
+- id: ensure_provenance
+  description: Fallback line-based source map if MinerU did not write provenance/source_map.jsonl.
+  needs: [normalized/manuscript.md]
+  produces: [provenance/source_map.jsonl]
+  command: index-markdown
+  positional: [normalized/manuscript.md, provenance/source_map.jsonl]
+
+- id: build_units
+  description: Build hierarchical review units (macro / chapters / sections).
+  needs: [normalized/manuscript.md]
+  produces: [units/index.md]
+  command: build-units
+  positional: [normalized/manuscript.md, units]
+
+- id: deepseek_macro
+  description: Whole-manuscript layered review.
+  needs: [units/macro/whole.md]
+  produces: [reviews/deepseek/macro/whole.json]
+  command: deepseek-review-unit
+  positional: [units/macro/whole.md, reviews/deepseek/macro/whole.json]
+  flags: ["--case-id={case_id}", "--case-type={case_type}", "--layer=macro", "--unit-id=whole"]
+
+- id: deepseek_chapters
+  description: Per-chapter layered review (fanout).
+  fanout_pattern: units/chapters/chapter_*.md
+  produces_template: reviews/deepseek/chapters/{stem}.json
+  command: deepseek-review-unit
+  positional_template: ["{unit}", "{output}"]
+  flags_template: ["--case-id={case_id}", "--case-type={case_type}", "--layer=chapter", "--unit-id={stem}"]
+
+- id: deepseek_sections
+  description: Per-section local review (fanout). Filtered by units/risk.json so only high-risk sections cost API calls.
+  fanout_pattern: units/sections/section_*.md
+  risk_threshold: 30.0
+  risk_table: units/risk.json
+  produces_template: reviews/deepseek/sections/{stem}.json
+  command: deepseek-review-unit
+  positional_template: ["{unit}", "{output}"]
+  flags_template: ["--case-id={case_id}", "--case-type={case_type}", "--layer=section", "--unit-id={stem}"]
+
+- id: aggregate
+  description: Aggregate per-unit reviews into reviews/issue_graph.json.
+  needs: [reviews/deepseek]
+  produces: [reviews/issue_graph.json]
+  command: aggregate-issue-graph
+  positional: [reviews/deepseek, reviews/issue_graph.json]
+  flags: ["--case-id={case_id}"]
+
+- id: extract_claims_draft
+  description: DeepSeek-extract author claims from the macro unit into evidence/claims_draft.json.
+  needs: [units/macro/whole.md]
+  produces: [evidence/claims_draft.json]
+  command: extract-claims
+  positional: [units/macro/whole.md, evidence/claims_draft.json]
+  flags: ["--case-id={case_id}", "--case-type={case_type}", "--unit-id=whole"]
+
+- id: claim_matrix_review
+  description: Human edits evidence/claims_draft.json into the canonical evidence/claim_evidence_matrix.json.
+  needs: [evidence/claims_draft.json]
+  produces: [evidence/claim_evidence_matrix.json]
+  gate: human
+  instruction: Edit evidence/claim_evidence_matrix.json from the draft. Add CLM ids, fix anchors, classify claim types, label evidence strength. Drop spurious or redundant entries.
+
+- id: link_issues_to_claims
+  description: Heuristically link reviews/issue_graph.json issues to evidence/claim_evidence_matrix.json claims by anchor proximity.
+  needs: [evidence/claim_evidence_matrix.json, reviews/issue_graph.json]
+  produces: [evidence/claim_evidence_matrix.json]
+  command: link-issues-to-claims
+  positional: [evidence/claim_evidence_matrix.json, reviews/issue_graph.json]
+
+- id: render_claim_matrix
+  description: Render evidence/claim_evidence_matrix.json to a Markdown view with linked issues.
+  needs: [evidence/claim_evidence_matrix.json]
+  produces: [evidence/claim_evidence_matrix.md]
+  command: render-claim-matrix
+  positional: [evidence/claim_evidence_matrix.json, evidence/claim_evidence_matrix.md]
+  flags: ["--issue-graph=reviews/issue_graph.json"]
+
+- id: synthesize_comments_draft
+  description: Auto-synthesize a draft review_comments.draft.json from issue_graph plus claim links.
+  needs: [reviews/issue_graph.json]
+  produces: [comments/review_comments.draft.json]
+  command: synthesize-comments
+  positional: [reviews/issue_graph.json, comments/review_comments.draft.json]
+  flags: ["--claim-matrix=evidence/claim_evidence_matrix.json"]
+
+- id: dissent
+  description: Adversarial dissent. thesis_undergrad uses the intensified prompt to counter examiner default-pass.
+  needs: [reviews/issue_graph.json]
+  produces: [reviews/dissent.md]
+  gate: human
+  instruction: Write reviews/dissent.md using templates/prompts/dissent_thesis.md. Required to neutralize examiner default-pass posture (GAP-007).
+
+- id: integrity_check
+  description: Integrity, ethics, AI-disclosure, and undergraduate ghost-writing red flag check.
+  needs: [normalized/manuscript.md]
+  produces: [reviews/integrity_check.md]
+  gate: human
+  instruction: Run templates/prompts/integrity_check.md. For thesis_undergrad, training cycle completion and ghost-writing red flags are required (GAP-009).
+
+- id: review_comments_human_edit
+  description: Refine the auto-synthesized draft into the canonical comments/review_comments.json.
+  needs: [comments/review_comments.draft.json]
+  produces: [comments/review_comments.json]
+  gate: human
+  instruction: Refine comments/review_comments.draft.json into comments/review_comments.json. Tighten wording, merge redundant entries, downgrade weak ones, and align severity with dissent and integrity findings.
+
+- id: render_author_comments
+  description: Render the page/line-anchored Markdown the author sees.
+  needs: [comments/review_comments.json, provenance/source_map.jsonl]
+  produces: [comments/author_facing_comments.md]
+  command: render-comments
+  positional: [comments/review_comments.json, provenance/source_map.jsonl, comments/author_facing_comments.md]
+
+- id: editorial_decision
+  description: Final human-owned editorial judgment.
+  needs: [comments/author_facing_comments.md]
+  produces: [decision/editorial_judgment.md]
+  gate: human
+  instruction: Fill decision/editorial_judgment.md per docs/decision_record_format.md. Distinguish adopted, rejected, and unresolved AI critiques.
+
+- id: retrospective
+  description: Case retrospective for KMS upgrade routes.
+  produces: [retrospective.md]
+  gate: human
+  instruction: Update retrospective.md with what the workflow caught, what it missed, and any candidate KMS upgrades.

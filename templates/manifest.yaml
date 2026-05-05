@@ -1,0 +1,26 @@
+case_id:
+title:
+case_type: journal
+thesis_format:
+discipline:
+status: initialized
+source_files: []
+normalized_files: []
+processing:
+  ingestion: pending
+  normalization: pending
+  provenance_mapping: pending
+  segmentation: pending
+  evidence_extraction: pending
+review:
+  primary: pending
+  verifier: pending
+  dissent: pending
+  synthesis: pending
+  integrity_check: pending
+decision:
+  owner:
+  status: pending
+privacy:
+  concrete_paper_material: local_only
+  git_tracking: ignored_by_default

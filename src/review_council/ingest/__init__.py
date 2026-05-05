@@ -1,0 +1,1 @@
+"""Source manuscript ingestion interfaces."""

@@ -1,0 +1,20 @@
+._*
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Local provider credentials and private runtime settings.
+config/*.local.env
+config/secrets*.env
+
+# Concrete review cases may contain raw manuscripts, private reviews, normalized
+# paper text, and editorial judgments. They are local by default.
+cases/*
+!cases/README.md

@@ -1,0 +1,83 @@
+# Repo-side final draft after Arbiter decisions.
+#
+# AI executors must not write this directly into _Governance. The Arbiter may
+# copy or adapt this into the official KMS profile.
+#
+# Intended target:
+#   <VAULT>/_Governance/project_review-council.yaml
+#
+# This repository may maintain drafts. The official KMS profile is owned by
+# the Arbiter and KMS governance rules.
+
+project_id: review-council
+name: review-council
+type: tooling
+repo_path: /Volumes/flemyng/home/Code/review-council
+description: Structured human-AI peer review with evidence, dissent, and accountable judgment.
+
+runtime_independence:
+  kms_required_for_case_processing: false
+  notes:
+    - Case ingestion, validation, normalization, and review records must work without Obsidian access.
+    - KMS is used for reusable knowledge governance, not per-case runtime state.
+
+paths:
+  project_spine: PROJECT.md
+  working_state: WORKING.md
+  gaps: GAPS.md
+  agent_rules: AGENTS.md
+  kms_interface: docs/kms_interface.md
+  cases: cases/
+  templates: templates/
+  rubrics: rubrics/
+  protocols: docs/
+  source_code: src/review_council/
+  tests: tests/
+
+knowledge_routes:
+  raw_manuscripts:
+    repo: cases/<case-id>/source/
+    git: ignored_by_default
+    kms: never_sync
+  normalized_manuscripts:
+    repo: cases/<case-id>/normalized/
+    git: ignored_by_default
+    kms: never_sync
+  role_reviews:
+    repo: cases/<case-id>/reviews/
+    git: ignored_by_default
+    kms: never_sync_specific_review_text
+  human_decisions:
+    repo: cases/<case-id>/decision/
+    git: ignored_by_default
+    kms: never_sync_specific_decision_text
+  retrospectives:
+    repo: cases/<case-id>/retrospective.md
+    git: ignored_by_default
+    kms: principle_upgrade_only_after_privacy_scrub
+  stable_rubrics:
+    repo: rubrics/
+    git: tracked
+    kms: repo_local_for_now
+  stable_protocols:
+    repo: docs/
+    git: tracked
+    kms: link_from_existing_ai_collaboration_methodology
+
+candidate_kms_entries:
+  project_moc:
+    path: "02-Projects/review-council.md"
+    owner: Arbiter
+    status: approved
+  methodology_cards: []
+  methodology_link_policy: "Do not create dedicated review methodology cards yet; link from existing AI collaboration methodology."
+
+arbiter_decisions:
+  official_profile_target: "_Governance/project_review-council.yaml"
+  project_moc_path: "02-Projects/review-council.md"
+  methodology_policy: "No new review methodology cards for now; attach to existing AI collaboration methodology."
+  privacy_policy: "Anything involving a concrete paper is not synced; case directories are ignored by Git."
+  rubrics_policy: "rubrics/ remains repo-local for now."
+
+manual_action_needed:
+  - Arbiter copies or adapts this draft into _Governance/project_review-council.yaml.
