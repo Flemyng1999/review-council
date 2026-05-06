@@ -32,6 +32,16 @@ Use model names in config, but keep prompts role-based:
   conflicts, checks overclaim risk, and prepares human-facing synthesis.
 - `human_editor`: final accountable judgment.
 
+For strong-model stages (`paper_shape`, `meta_review_issues`,
+`methodology_adversary`, `author_review_plan`, `author_editorial_rewrite`),
+follow the **Cross-Provider Critique Architecture** rules in
+`docs/review_framework.md`. In particular: cross-provider runs go through the
+manual provider seam, the merge step preserves single-provider fatals via
+`needs_human_decision`, and final author output must pass through
+`author_editorial_rewrite` so `redact_internal_tokens` runs as the validator
+gate. Do not introduce majority voting, do not bypass the rewrite stage, and
+do not replace cheap fanout with strong-model calls.
+
 ## Recommended Workflow
 
 1. **Freeze and map**: produce `frozen/manuscript.pdf`, `normalized/manuscript.md`,

@@ -18,6 +18,7 @@ Boundaries:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -36,6 +37,15 @@ class ClaimAnchor:
     line_end: int | None = None
 
 
+_TOKEN_RE = re.compile(r"[A-Za-z0-9一-鿿]+")
+
+
+def _tokens(text: str) -> list[str]:
+    if not text:
+        return []
+    return [t.lower() for t in _TOKEN_RE.findall(text) if len(t) > 1]
+
+
 @dataclass
 class EvidenceAnchor:
     type: str = ""
@@ -51,6 +61,8 @@ class Claim:
     type: str = ""
     source_unit: str = ""
     anchor: ClaimAnchor = field(default_factory=ClaimAnchor)
+    anchor_confidence: str = ""
+    anchor_note: str = ""
     evidence_anchors: list[EvidenceAnchor] = field(default_factory=list)
     linked_issues: list[str] = field(default_factory=list)
 
@@ -162,8 +174,12 @@ def render_claim_matrix_md(
 
 
 def _suggest_issue_links(claim: Claim, issues: list[dict], link_window: int) -> list[str]:
-    if not claim.anchor.line_start:
-        return []
+    if claim.anchor.line_start:
+        return _suggest_by_anchor(claim, issues, link_window)
+    return _suggest_by_similarity(claim, issues)
+
+
+def _suggest_by_anchor(claim: Claim, issues: list[dict], link_window: int) -> list[str]:
     c_lo = claim.anchor.line_start - link_window
     c_hi = (claim.anchor.line_end or claim.anchor.line_start) + link_window
 
@@ -183,6 +199,167 @@ def _suggest_issue_links(claim: Claim, issues: list[dict], link_window: int) -> 
                 continue
         out.append(str(issue.get("id", "")))
     return [oid for oid in out if oid]
+
+
+def _suggest_by_similarity(claim: Claim, issues: list[dict], min_overlap: int = 3) -> list[str]:
+    """Fallback linker for claims without line anchors.
+
+    Uses token overlap between claim text and the issue's diagnosis/quote/
+    recommendation, restricted to issues whose source_unit matches when
+    `claim.source_unit` is set. Stays conservative: only links when overlap
+    is meaningful and section context is consistent.
+    """
+    claim_tokens = _similarity_terms(claim.text)
+    if len(claim_tokens) < min_overlap:
+        return []
+    out: list[str] = []
+    claim_unit_tail = claim.source_unit.split("/")[-1] if claim.source_unit else ""
+    for issue in issues:
+        if claim_unit_tail and claim_unit_tail not in {"whole", "macro"} and issue.get("source_units"):
+            if not any(claim_unit_tail in unit for unit in issue["source_units"]):
+                continue
+        text = " ".join(
+            str(issue.get(k, "") or "")
+            for k in ("diagnosis", "evidence_quote", "quote", "recommendation")
+        )
+        issue_tokens = _similarity_terms(text)
+        overlap = claim_tokens & issue_tokens
+        if len(overlap) >= min_overlap:
+            iid = str(issue.get("id", ""))
+            if iid:
+                out.append(iid)
+    return out
+
+
+def _similarity_terms(text: str) -> set[str]:
+    terms = set(_tokens(text))
+    cjk = "".join(re.findall(r"[一-鿿]+", text.lower()))
+    for n in (2, 3):
+        for i in range(0, max(0, len(cjk) - n + 1)):
+            terms.add(cjk[i : i + n])
+    return {term for term in terms if len(term) > 1}
+
+
+def backfill_claim_anchors(claims_path: Path, unit_path: Path) -> dict:
+    """Backfill `anchor.line_start/line_end` for claims with null anchors.
+
+    Searches the unit body for the longest matching n-gram of claim text and
+    records `anchor_confidence` (high|medium|low|none) plus `anchor_note`.
+    Page is left as-is (page resolution requires a source map).
+    """
+    if not claims_path.exists() or not unit_path.exists():
+        return {"claims": 0, "backfilled": 0}
+
+    data = _loads_json_maybe_fenced(claims_path.read_text(encoding="utf-8"))
+    raw_text = unit_path.read_text(encoding="utf-8")
+    body, _frontmatter_offset, fm_line_start = _strip_frontmatter(raw_text)
+    body_lines = body.splitlines()
+
+    claims = data.get("claims") or []
+    backfilled = 0
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        anchor = claim.get("anchor") or {}
+        if not isinstance(anchor, dict):
+            anchor = {}
+        if anchor.get("line_start"):
+            claim["anchor"] = {
+                "page": anchor.get("page"),
+                "line_start": anchor.get("line_start"),
+                "line_end": anchor.get("line_end") or anchor.get("line_start"),
+            }
+            claim.setdefault("anchor_confidence", "high")
+            continue
+
+        text = str(claim.get("text") or "")
+        match = _locate_text_in_lines(text, body_lines)
+        if match is None:
+            claim["anchor"] = {"page": anchor.get("page"), "line_start": None, "line_end": None}
+            claim["anchor_confidence"] = "none"
+            claim["anchor_note"] = "no text match in source unit"
+            continue
+
+        local_start, local_end, confidence = match
+        absolute_start = local_start + 1 + fm_line_start
+        absolute_end = local_end + 1 + fm_line_start
+        claim["anchor"] = {
+            "page": anchor.get("page"),
+            "line_start": absolute_start,
+            "line_end": absolute_end,
+        }
+        claim["anchor_confidence"] = confidence
+        claim["anchor_note"] = f"text-match in {unit_path.name}"
+        backfilled += 1
+
+    claims_path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return {"claims": len(claims), "backfilled": backfilled}
+
+
+def _loads_json_maybe_fenced(text: str) -> dict:
+    stripped = text.strip()
+    match = re.search(r"```(?:json)?\s*(.*?)\s*```", stripped, re.DOTALL)
+    if match:
+        stripped = match.group(1).strip()
+    return json.loads(stripped)
+
+
+def _strip_frontmatter(text: str) -> tuple[str, int, int]:
+    """Return (body, frontmatter_line_count, normalized_line_start_offset).
+
+    If the unit YAML frontmatter declares `normalized_line_start: N`, treat
+    that as the absolute starting line; otherwise the body lines are 1-indexed
+    relative to the unit file itself.
+    """
+    if not text.startswith("---"):
+        return text, 0, 0
+    lines = text.splitlines()
+    end_index = -1
+    for i in range(1, min(len(lines), 80)):
+        if lines[i].strip() == "---":
+            end_index = i
+            break
+    if end_index < 0:
+        return text, 0, 0
+    fm_block = "\n".join(lines[1:end_index])
+    body = "\n".join(lines[end_index + 1 :])
+    fm_offset = end_index + 1  # number of consumed lines
+    norm_start = 0
+    match = re.search(r"^normalized_line_start:\s*(\d+)", fm_block, re.MULTILINE)
+    if match:
+        norm_start = int(match.group(1)) - 1  # convert to 0-based offset relative to body line 1
+    return body, fm_offset, norm_start
+
+
+def _locate_text_in_lines(text: str, lines: list[str]) -> tuple[int, int, str] | None:
+    """Locate `text` inside `lines`. Returns (start_idx, end_idx, confidence).
+
+    Strategy: try long n-gram match (>=8 tokens) → high; fall back to >=4 →
+    medium; fall back to >=2 contiguous tokens → low. Indices are 0-based.
+    """
+    tokens = _tokens(text)
+    if not tokens:
+        return None
+    haystack = "\n".join(lines)
+    haystack_lower = haystack.lower()
+
+    for n, conf in ((8, "high"), (4, "medium"), (2, "low")):
+        if len(tokens) < n:
+            continue
+        for start in range(0, len(tokens) - n + 1):
+            window = tokens[start : start + n]
+            needle = " ".join(window)
+            if needle in haystack_lower:
+                # Find which line range it spans.
+                pos = haystack_lower.find(needle)
+                line_start = haystack_lower.count("\n", 0, pos)
+                end_pos = pos + len(needle)
+                line_end = haystack_lower.count("\n", 0, end_pos)
+                return line_start, line_end, conf
+        # Only return the highest-confidence match found at this level
+    return None
 
 
 def _parse_claim(raw: dict) -> Claim:
@@ -210,6 +387,8 @@ def _parse_claim(raw: dict) -> Claim:
         type=str(raw.get("type", "")),
         source_unit=str(raw.get("source_unit", "")),
         anchor=anchor,
+        anchor_confidence=str(raw.get("anchor_confidence", "")),
+        anchor_note=str(raw.get("anchor_note", "")),
         evidence_anchors=evidence,
         linked_issues=[str(x) for x in raw.get("linked_issues") or [] if str(x).strip()],
     )

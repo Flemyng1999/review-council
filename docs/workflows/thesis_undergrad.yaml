@@ -120,13 +120,83 @@ stages:
   positional: [reviews/issue_graph.json, comments/review_comments.draft.json]
   flags: ["--claim-matrix=evidence/claim_evidence_matrix.json"]
 
+- id: detail_audit
+  description: Preserve v1-style concrete technical details as checklist items so the strategic meta-review cannot compress them away.
+  needs: [reviews/issue_graph.json]
+  produces: [comments/detail_audit.json]
+  command: detail-audit
+  positional: [reviews/issue_graph.json, comments/detail_audit.json]
+
 - id: meta_review_issues
-  description: Strong-model meta-review anchored on paper_shape — cross-anchor dedup, severity recalibration, revision_priority assignment, track assignment, macro re-contextualization.
+  description: Strategic strong-model meta-review anchored on paper_shape — cross-anchor dedup, severity recalibration, revision_priority assignment, track assignment, macro re-contextualization. It should handle paper-shape-level comments, not low-level checklist retention.
   needs: [reviews/issue_graph.json, comments/review_comments.draft.json, reviews/paper_shape.md]
   produces: [reviews/meta_review.md, comments/review_comments.meta.json]
   command: meta-review-issues
   positional: [reviews/issue_graph.json, reviews/meta_review.md, comments/review_comments.meta.json]
   flags: ["--draft=comments/review_comments.draft.json", "--claim-matrix=evidence/claim_evidence_matrix.json", "--paper-shape=reviews/paper_shape.md", "--units-root=units"]
+
+- id: compose_author_review
+  description: Legacy/fallback composer (V6 era). Writes a deterministic author Markdown from paper_shape + strategic comments + detail_audit. Kept because `author_editorial_rewrite` reuses its body when no strong-model API key is available; it is no longer the canonical author deliverable. The canonical author Markdown is overwritten later by `author_editorial_rewrite`.
+  needs: [reviews/paper_shape.md, comments/review_comments.meta.json, comments/detail_audit.json, provenance/source_map.jsonl]
+  produces: [comments/author_review_package.json, comments/author_facing_comments.md]
+  command: compose-author-review
+  positional: [reviews/paper_shape.md, comments/review_comments.meta.json, comments/detail_audit.json, provenance/source_map.jsonl, comments/author_facing_comments.md]
+  flags: ["--output-json=comments/author_review_package.json"]
+
+- id: author_polish
+  description: Final deterministic language cleanup for author-facing Markdown — remove process/provenance terms and normalize wording.
+  needs: [comments/author_facing_comments.md]
+  produces: [comments/author_facing_comments.md]
+  command: author-polish
+  positional: [comments/author_facing_comments.md, comments/author_facing_comments.md]
+
+- id: methodology_adversary
+  description: Strong-model adversarial methodology audit (default provider, deepseek). Reads intro + methods + results in full and emits hidden_assumptions + unmet_research_goals + headline_claim_dependencies. Plan force-merges fatal/major findings into must_keep_strategic.
+  needs: [units/chapters/chapter_01.md, units/chapters/chapter_03.md, units/chapters/chapter_04.md]
+  produces: [reviews/methodology_adversary.json]
+  command: methodology-adversary
+  positional: [units/chapters/chapter_01.md, units/chapters/chapter_03.md, units/chapters/chapter_04.md, reviews/methodology_adversary.json]
+  flags: ["--case-id={case_id}", "--provider=deepseek"]
+
+- id: methodology_adversary_secondary
+  description: Optional cross-provider adversary (Claude/GPT). Manual mode by default — drop the secondary LLM response into reviews/methodology_adversary.secondary_response.txt. With --skip-if-missing, the stage writes a manual_pending stub and exits 0 when no response is present, so the workflow never blocks on a missing cross-provider input.
+  needs: [units/chapters/chapter_01.md, units/chapters/chapter_03.md, units/chapters/chapter_04.md]
+  produces: [reviews/methodology_adversary.secondary.json]
+  command: methodology-adversary
+  positional: [units/chapters/chapter_01.md, units/chapters/chapter_03.md, units/chapters/chapter_04.md, reviews/methodology_adversary.secondary.json]
+  flags:
+    - "--case-id={case_id}"
+    - "--provider=manual"
+    - "--external-input=reviews/methodology_adversary.secondary_response.txt"
+    - "--prompt-cache=reviews/methodology_adversary.secondary_prompt.md"
+    - "--skip-if-missing"
+
+- id: merge_methodology_adversaries
+  description: Merge primary (deepseek) + secondary (cross-provider, optional) adversary outputs. Classifies each finding as all_agree / multi_provider / single_provider_only / conflict, votes severity across sources, and surfaces a needs_human_decision list (conflicts, single-provider fatals, every claim_downgrade).
+  needs: [reviews/methodology_adversary.json]
+  produces: [reviews/methodology_adversary.merged.json, reviews/methodology_adversary.merged.md]
+  command: merge-methodology-adversaries
+  positional: [reviews/methodology_adversary.merged.json]
+  flags:
+    - "--input=reviews/methodology_adversary.json"
+    - "--input=reviews/methodology_adversary.secondary.json"
+    - "--md=reviews/methodology_adversary.merged.md"
+
+- id: author_review_plan
+  description: Editorial planning step. Decides best form, three overall revision directions, must-keep strategic comments, detail pool, demote/drop, and voice. Reads the merged methodology adversary so cross-provider fatal/major findings (and needs_human_decision flags) propagate into the plan; force-merges fatal/major into must_keep_strategic so they never silently drop.
+  needs: [reviews/paper_shape.md, comments/review_comments.meta.json, comments/detail_audit.json, reviews/methodology_adversary.merged.json]
+  produces: [comments/author_review_plan.json, comments/author_review_plan.md]
+  command: author-review-plan
+  positional: [reviews/paper_shape.md, comments/review_comments.meta.json, comments/detail_audit.json, comments/author_review_plan.json, comments/author_review_plan.md]
+  flags: ["--voice=senior_peer", "--methodology-adversary=reviews/methodology_adversary.merged.json"]
+
+- id: author_editorial_rewrite
+  description: Strong-model editorial rewrite of the deliverable author-facing review. Reads paper_shape + plan + meta comments + detail audit, produces the canonical comments/author_facing_comments.md with internal-token redaction. Falls back to deterministic compose+polish offline.
+  needs: [reviews/paper_shape.md, comments/author_review_plan.json, comments/review_comments.meta.json, comments/detail_audit.json, provenance/source_map.jsonl]
+  produces: [comments/author_facing_comments.md]
+  command: author-editorial-rewrite
+  positional: [reviews/paper_shape.md, comments/author_review_plan.json, comments/review_comments.meta.json, comments/detail_audit.json, provenance/source_map.jsonl, comments/author_facing_comments.md]
+  flags: ["--voice=senior_peer"]
 
 - id: dissent
   description: Adversarial dissent. thesis_undergrad uses the intensified prompt to counter examiner default-pass.
@@ -143,18 +213,18 @@ stages:
   instruction: Run templates/prompts/integrity_check.md. For thesis_undergrad, training cycle completion and ghost-writing red flags are required (GAP-009).
 
 - id: review_comments_human_edit
-  description: Human refines comments/review_comments.meta.json into the canonical comments/review_comments.json.
-  needs: [comments/review_comments.meta.json]
+  description: Human reviews the canonical author Markdown (produced by author_editorial_rewrite) and optionally refines comments/review_comments.meta.json into comments/review_comments.json for the legacy structured renderer below.
+  needs: [comments/author_facing_comments.md, comments/review_comments.meta.json]
   produces: [comments/review_comments.json]
   gate: human
-  instruction: Copy comments/review_comments.meta.json to comments/review_comments.json, then refine. The strong-model meta-review has already merged duplicates, recalibrated severity, assigned revision_priority and tracks, and anchored against paper_shape.md. Trim further, sharpen wording, and align with dissent and integrity findings before rendering for the author.
+  instruction: Review comments/author_facing_comments.md first — that is the canonical author deliverable, written by author_editorial_rewrite over the merged adversary plan. Only fill comments/review_comments.json if you need the legacy structured renderer; the author version is no longer derived from this file.
 
 - id: render_author_comments
-  description: Render the author-direct view — clean, sorted by revision_priority, no provenance, paper_shape embedded.
+  description: Legacy structured-comments renderer. Writes comments/author_facing_comments.legacy.md from comments/review_comments.json. The canonical author deliverable for thesis_undergrad is comments/author_facing_comments.md, produced by author_editorial_rewrite.
   needs: [comments/review_comments.json, provenance/source_map.jsonl]
-  produces: [comments/author_facing_comments.md]
+  produces: [comments/author_facing_comments.legacy.md]
   command: render-comments
-  positional: [comments/review_comments.json, provenance/source_map.jsonl, comments/author_facing_comments.md]
+  positional: [comments/review_comments.json, provenance/source_map.jsonl, comments/author_facing_comments.legacy.md]
   flags: ["--mode=author", "--paper-shape=reviews/paper_shape.md"]
 
 - id: render_supervisor_comments

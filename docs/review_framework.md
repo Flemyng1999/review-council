@@ -284,6 +284,160 @@ Every review should end with:
 7. dissent summary;
 8. confidence and limits of the review.
 
+## Cross-Provider Critique Architecture
+
+The strong-model layer of this framework operates under four hard rules.
+They are stated together because dropping any one collapses the others
+into single-model concatenation — a known failure mode that produced
+unusable author reviews before this architecture stabilized (see
+`cases/paper_B-jmz/retrospective.md` for the V1–V11 evidence trail).
+
+```text
+同模型 multi-run 解决随机性；
+跨 provider 独立审稿解决模型家族盲区；
+merge 阶段必须保留 single-provider fatal；
+最终作者版必须经过 human/editorial rewrite。
+```
+
+### Why each rule is non-negotiable
+
+**Same-model multi-run handles sampling variance.** A strong model at
+temperature 0.2 still varies run-to-run by ±0.5 hits on an 8-question
+methodology rubric — an artefact of the model's sampling, not its
+intelligence. Multi-run with light temperature variation
+(`--n-runs N --temperature T`) plus per-run dedupe in
+`methodology_adversary` smooths this. It does not address what the model
+*never* sees.
+
+**Cross-provider critique handles model-family blind spots.** Same-family
+models share systematic framing biases: which assumptions they treat as
+obvious, which adjacent angles they prefer to explicit ones, which kinds
+of statistical critique they avoid. Re-running the same model 10× cannot
+escape its family blind spot. Routing the same prompt through a
+different provider via the manual adapter
+(`--provider manual --external-input ...`) does. On `paper_B-jmz`, V11 =
+8/8 vs V10 = 7.25/8 came entirely from this: framings the primary
+provider would only reach at adjacent angles were supplied directly by
+the second provider.
+
+**The merge stage must preserve single-provider fatal findings.** This
+is the most-violated rule in naïve ensembling. The intuition "average
+the providers' opinions" produces a majority-vote step, which silently
+drops findings only one provider raised. But sharp methodology critique
+*is* the case where one reviewer sees what others did not — exactly the
+case majority voting suppresses. The framework's
+`needs_human_decision` list explicitly escalates every
+`single_provider_only AND fatal` finding (and every claim downgrade)
+for human review rather than tallying votes against it. **Never replace
+this with majority voting.** When in doubt, the merge step under-merges
+rather than over-merges; the human cost of collapsing a few duplicated
+entries is far below the cost of one provider-only fatal quietly
+disappearing.
+
+**Author-facing output must pass through editorial rewrite.** Even with
+a perfect adversary stage and a perfect merge, the raw merged JSON is
+not deliverable: it leaks model names, internal IDs, severity tokens,
+and reads like an internal meta-review. The `author_editorial_rewrite`
+stage is the only seam where the final voice (`--voice senior_peer`)
+is enforced and `redact_internal_tokens` runs as a final validator
+returning a non-zero exit when any leak survives. Skipping this stage
+or letting users hand the merged JSON straight to the author defeats
+every guarantee above.
+
+### Where these rules are enforced in code
+
+The four rules above are not aspirational; each has a structural
+mechanism that prevents future contributors from accidentally
+regressing past it:
+
+| Rule | Mechanism | Location |
+|---|---|---|
+| Same-model multi-run | `--n-runs N` with per-run dedupe via `_dedupe_for_top_level` | `src/review_council/methodology_adversary.py` |
+| Provider-agnostic call seam | Single `complete(req, provider=...)` registry; no SDK is imported by stage code | `src/review_council/providers/__init__.py` |
+| Single-provider fatal preservation | `needs_human_decision` escalates `(single_provider_only AND fatal)` + every `claim_downgrade` + every severity `conflict` | `src/review_council/adversary_merge.py` |
+| Adversary findings survive plan | `_force_merge_adversary` re-attaches dropped fatal items even after a strong model rewrites the plan | `src/review_council/author_editorial.py` |
+| Adversary findings survive rewrite | Rewrite prompt's `### 隐藏假设与对照缺口` and `### 论文核心声明的证据匹配度` subsections are mandatory templates with explicit "禁止压平" clauses | `templates/prompts/author_editorial_rewrite.md` |
+| No internal tokens reach the author | `redact_internal_tokens` + `find_internal_tokens` validator; CLI exits non-zero on leaks | `src/review_council/author_editorial.py` |
+| Stale external-file cache invalidation | Stage fingerprint hashes the contents of `--external-input` and `--input` files | `src/review_council/runner.py` |
+
+### Anti-patterns
+
+These look like improvements and are not. They were considered, tested,
+or observed as failure modes during V1–V11; do not reintroduce them.
+
+- **Replacing the cheap fanout with a strong model.** Cheap fanout
+  does local issue extraction; strong models do cross-chapter judgment.
+  Spending strong-model calls on per-section scans wastes budget without
+  raising the upper-bound quality.
+- **Majority voting in the merge step.** Drops single-provider fatals.
+  See above.
+- **Letting the rewrite stage paraphrase fatal items into "please add
+  more detail" recommendations.** This was the V7 → V8 failure: the
+  model's instinct is to soften assertive critique, and without a
+  dedicated subsection template it will. The fix is a template that
+  forces the assertive form; do not relax it.
+- **Adding new required output types to a strong-model prompt without
+  raising the budget floor.** This was the V8 → V9 trade-off: forcing
+  `headline_claim_dependencies` into the same `hidden_assumptions ≥ 6`
+  budget caused the model to soften other items to make room. New
+  required types must come with a higher floor.
+- **Designing a richer provider plugin protocol.** The current registry
+  is intentionally small (`(CompletionRequest) -> str`). The point is
+  one routing seam, not a plugin ecosystem.
+- **Hand-fixing the merged JSON instead of feeding it to plan +
+  rewrite.** The redaction validator only runs at the final write; any
+  channel that bypasses the rewrite stage bypasses the validator.
+
+### Reproducibility status
+
+Validated on N=1 case (`paper_B-jmz`, undergraduate thesis,
+quantitative remote sensing). The V11 result (8/8 hard methodology
+rubric + 7 bonus findings) is single-run and benefits from this case
+being the one the rubric was derived from. The framework's
+generalizability across `case_type` (journal, thesis_master, thesis_phd)
+and across discipline (non-remote-sensing) is currently unverified.
+**Until a second real case validates reproducibility, the framework
+should be considered "validated in principle, not in repeated
+practice."**
+
+The right next experiment is therefore not further optimization on
+`paper_B-jmz` but a clean run on a structurally different case.
+
+### Baseline-And-Integration Extension
+
+After the structured project review has produced a mature author-facing
+draft, a high-value validation pattern is:
+
+```text
+项目结构化审稿
+→ 生成同一原文的多 AI 无结构 baseline 审稿
+→ 对多份 comments 做盲审研判
+→ 整合最终作者版
+```
+
+This extension answers a different question from cross-provider
+adversary merge. Cross-provider merge improves the *project pipeline* by
+bringing independent methodology findings into `needs_human_decision`.
+Unstructured baseline comments test whether the pipeline is outperforming
+or merely matching a strong single reviewer. The baseline reviewers must
+see only the manuscript, not `issue_graph`, `paper_shape`, adversary
+outputs, prior review versions, or project retrospectives.
+
+The integration rule is:
+
+- use the project review for traceable methodology critique and claim
+  downgrades;
+- use strong baseline comments for natural author voice, implementation
+  details, citation/reference checking, and concrete repair language;
+- never choose a winner by majority vote;
+- treat baseline-only sharp findings the same way as provider-only fatal
+  findings: they must be reviewed and either integrated, downgraded, or
+  explicitly rejected in the retrospective / decision record.
+
+The expected final author version is therefore not "V11 alone" or "the
+best single-AI baseline alone"; it is an editorial synthesis of distinct
+reviewer strengths.
+
 ## AI Use Rules
 
 - AI can extract, compare, verify, summarize, and generate dissent.

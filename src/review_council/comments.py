@@ -14,6 +14,7 @@ list — backward compatible with v1-style comments.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from review_council.provenance import load_source_map
@@ -36,8 +37,20 @@ TRACK_LABELS = {
     "references_format": "References & Format",
 }
 
+TRACK_LABELS_ZH = {
+    "main_argument": "主线论证",
+    "experimental_design": "实验设计",
+    "methods": "方法",
+    "results_validation": "结果与验证",
+    "chapter_structure": "章节结构",
+    "references_format": "引用与格式",
+}
+
+PRIORITY_LABELS_ZH = {"high": "高", "medium": "中", "low": "低"}
+
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2, "": 3}
 SEVERITY_RANK = {"blocking": 0, "major": 1, "moderate": 2, "minor": 3, "": 4}
+PROVENANCE_TOKEN_RE = re.compile(r"\b(?:ISS|CLM|CMT)-\d{4}\b")
 
 
 def render_comments(
@@ -47,6 +60,8 @@ def render_comments(
     *,
     mode: str = "author",
     paper_shape_path: Path | None = None,
+    locale: str = "en",
+    hide_priority: bool = False,
 ) -> None:
     if mode not in {"author", "supervisor"}:
         raise ValueError(f"Unknown render mode: {mode}")
@@ -59,9 +74,9 @@ def render_comments(
 
     has_tracks = any(c.get("track") for c in comments)
     if has_tracks:
-        text = _render_grouped(comments, source_map, line_to_page, mode, paper_shape_md)
+        text = _render_grouped(comments, source_map, line_to_page, mode, paper_shape_md, locale, hide_priority)
     else:
-        text = _render_flat(comments, source_map, line_to_page, mode, paper_shape_md)
+        text = _render_flat(comments, source_map, line_to_page, mode, paper_shape_md, locale, hide_priority)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text, encoding="utf-8")
@@ -115,9 +130,12 @@ def _header(mode: str, paper_shape_md: str) -> list[str]:
     title = "Author-Facing Review Comments" if mode == "author" else "Supervisor Internal Review"
     out = [f"# {title}", ""]
     if paper_shape_md:
-        out.append("## Paper Shape")
-        out.append("")
-        out.append(paper_shape_md)
+        shape_title = "Overall Revision Direction" if mode == "author" else "Paper Shape"
+        shape_md = _clean_author_text(paper_shape_md, mode)
+        if not shape_md.lstrip().startswith("#"):
+            out.append(f"## {shape_title}")
+            out.append("")
+        out.append(shape_md)
         out.append("")
         out.append("---")
         out.append("")
@@ -130,12 +148,14 @@ def _render_flat(
     line_to_page: list[tuple[int, int]],
     mode: str,
     paper_shape_md: str,
+    locale: str,
+    hide_priority: bool,
 ) -> str:
     visible = [c for c in comments if c.get("comment")]
     visible.sort(key=lambda c: _comment_sort_key(c, mode))
     lines = _header(mode, paper_shape_md)
     for index, comment in enumerate(visible, start=1):
-        lines.extend(_format_comment_block(index, comment, source_map, line_to_page, mode))
+        lines.extend(_format_comment_block(index, comment, source_map, line_to_page, mode, locale, hide_priority))
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -145,6 +165,8 @@ def _render_grouped(
     line_to_page: list[tuple[int, int]],
     mode: str,
     paper_shape_md: str,
+    locale: str,
+    hide_priority: bool,
 ) -> str:
     by_track: dict[str, list[dict]] = {}
     for comment in comments:
@@ -163,12 +185,13 @@ def _render_grouped(
         bucket = by_track.get(track) or []
         if not bucket:
             continue
-        label = TRACK_LABELS.get(track, track.replace("_", " ").title())
+        labels = TRACK_LABELS_ZH if locale == "zh" else TRACK_LABELS
+        label = labels.get(track, track.replace("_", " ").title())
         lines.append(f"## {label}")
         lines.append("")
         for comment in bucket:
             counter += 1
-            lines.extend(_format_comment_block(counter, comment, source_map, line_to_page, mode))
+            lines.extend(_format_comment_block(counter, comment, source_map, line_to_page, mode, locale, hide_priority))
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -178,6 +201,8 @@ def _format_comment_block(
     source_map: dict,
     line_to_page: list[tuple[int, int]],
     mode: str,
+    locale: str,
+    hide_priority: bool,
 ) -> list[str]:
     anchor = source_map.get(str(comment.get("anchor_id", "")), {})
     line_start = comment.get("line_start") or anchor.get("source_line_start") or anchor.get("normalized_line_start")
@@ -194,19 +219,24 @@ def _format_comment_block(
     priority = comment.get("revision_priority") or ""
     if mode == "supervisor" and priority:
         head = f"### {counter}. {severity.title()} / priority={priority} - {location}"
-    elif mode == "author" and priority:
-        head = f"### {counter}. Priority {priority.title()} - {location}"
+    elif mode == "author" and priority and not hide_priority:
+        if locale == "zh":
+            priority_label = PRIORITY_LABELS_ZH.get(str(priority), str(priority))
+            head = f"### {counter}. 优先级：{priority_label} - {location}"
+        else:
+            head = f"### {counter}. Priority {priority.title()} - {location}"
     else:
         head = f"### {counter}. {severity.title()} - {location}"
 
     out = [head, ""]
     quote = comment.get("quote") or anchor.get("text")
     if quote:
-        out.extend(["> " + str(quote).replace("\n", "\n> "), ""])
-    out.extend([str(comment["comment"]), ""])
+        quote_text = _clean_author_text(str(quote), mode)
+        out.extend(["> " + quote_text.replace("\n", "\n> "), ""])
+    out.extend([_clean_author_text(str(comment["comment"]), mode), ""])
     recommendation = comment.get("recommendation")
     if recommendation:
-        out.extend([f"Recommendation: {recommendation}", ""])
+        out.extend([f"Recommendation: {_clean_author_text(str(recommendation), mode)}", ""])
     if mode == "supervisor":
         derived = comment.get("derived_from_issues") or []
         linked = comment.get("linked_claims") or []
@@ -218,6 +248,41 @@ def _format_comment_block(
                 provenance.append("claims " + ", ".join(linked))
             out.extend([f"_Provenance: {' · '.join(provenance)}_", ""])
     return out
+
+
+def _clean_author_text(text: str, mode: str) -> str:
+    if mode != "author":
+        return text
+    cleaned = PROVENANCE_TOKEN_RE.sub("", text)
+    cleaned = re.sub(
+        r"\b[Pp]aper[_ -]?shape\s+[Tt]ransformation [Aa]ction\s+\d+\b",
+        "the corresponding revision goal",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"\b[Tt]op\s+3\s+[Tt]ransformation [Aa]ctions\b",
+        "Top 3 revision goals",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"\b[Tt]ransformation [Aa]ction\s+\d+\b",
+        "the corresponding revision goal",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"\b[Pp]aper[_ -]?shape best-version insight\b",
+        "the strongest-version interpretation",
+        cleaned,
+    )
+    cleaned = re.sub(r"(?m)^# Paper Shape$", "# Overall Revision Direction", cleaned)
+    cleaned = re.sub(r"\b[Pp]aper[_ -]?shape\b", "the overall revision direction", cleaned)
+    cleaned = re.sub(r"\bcheap reviewers raised multiple issues\b", "several local issues were identified", cleaned)
+    cleaned = re.sub(r"\bcheap reviewers\b", "preliminary review", cleaned)
+    cleaned = re.sub(r"\(\s*(?:,\s*)*\)", "", cleaned)
+    cleaned = re.sub(r"\s+,", ",", cleaned)
+    cleaned = re.sub(r",\s*,+", ",", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned
 
 
 def _coerce_int(value: object) -> int | None:

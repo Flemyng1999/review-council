@@ -9,17 +9,30 @@ from pathlib import Path
 from review_council.case.manifest import CASE_TYPES, CaseManifest
 from review_council.case.paths import create_case, default_cases_root, repo_root
 from review_council.case.validate import validate_case
+from review_council.author_editorial import (
+    DEFAULT_VOICE,
+    VOICE_PROFILES,
+    build_author_review_plan,
+    run_author_editorial_rewrite,
+)
+from review_council.author_review import compose_author_review, polish_author_review
 from review_council.claim_evidence import (
     DEFAULT_LINK_WINDOW,
+    backfill_claim_anchors,
     link_issues_to_claims,
     render_claim_matrix_md,
 )
 from review_council.comments import render_comments
 from review_council.comment_synthesis import DEFAULT_KEEP, synthesize_comments
 from review_council.config import get_config_value
+from review_council.detail_audit import build_detail_audit
 from review_council.freeze import freeze_docx_to_pdf
 from review_council.issue_graph import aggregate as aggregate_issue_graph
 from review_council.meta_review import META_DEFAULT_MODEL, backfill_anchors, run_meta_review
+from review_council.methodology_adversary import (
+    DEFAULT_MODEL as METHODOLOGY_ADVERSARY_DEFAULT_MODEL,
+    run_methodology_adversary,
+)
 from review_council.paper_shape import run_paper_shape
 from review_council.prompts import render_prompt_template
 from review_council.provenance import build_markdown_line_map
@@ -81,6 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--mode", choices=["author", "supervisor"], default="author")
     render.add_argument("--paper-shape", type=Path, default=None, help="Optional reviews/paper_shape.md to embed at top")
     render.add_argument("--show-provenance", action="store_true", help="Deprecated alias for --mode supervisor")
+    render.add_argument("--locale", choices=["en", "zh"], default="en", help="Label language for priority/severity headings")
+    render.add_argument("--hide-priority", action="store_true", help="Hide the Priority/优先级 label in author headings")
 
     paper_shape = subparsers.add_parser("paper-shape", help="Forced gestalt artifact: best version, current shape, top three transformation actions")
     paper_shape.add_argument("unit_path", type=Path, help="units/macro/whole.md")
@@ -148,6 +163,97 @@ def build_parser() -> argparse.ArgumentParser:
     synthesize.add_argument("--claim-matrix", type=Path, default=None, help="Optional evidence/claim_evidence_matrix.json for linked_claims")
     synthesize.add_argument("--keep", default=",".join(DEFAULT_KEEP), help="Comma-separated severities to keep")
 
+    detail_audit = subparsers.add_parser("detail-audit", help="Keep v1-style technical details as checklist items for author-review composition")
+    detail_audit.add_argument("issue_graph_path", type=Path)
+    detail_audit.add_argument("output_path", type=Path)
+    detail_audit.add_argument("--max-items", type=int, default=36)
+
+    compose_author = subparsers.add_parser("compose-author-review", help="Compose final author-facing review from paper_shape + strategic comments + detail audit")
+    compose_author.add_argument("paper_shape_path", type=Path)
+    compose_author.add_argument("strategic_comments_path", type=Path)
+    compose_author.add_argument("detail_audit_path", type=Path)
+    compose_author.add_argument("source_map_path", type=Path)
+    compose_author.add_argument("output_md_path", type=Path)
+    compose_author.add_argument("--output-json", type=Path, default=None)
+
+    author_polish = subparsers.add_parser("author-polish", help="Clean process/provenance language from an author-facing Markdown review")
+    author_polish.add_argument("input_md_path", type=Path)
+    author_polish.add_argument("output_md_path", type=Path)
+
+    voices = sorted(VOICE_PROFILES.keys())
+
+    plan = subparsers.add_parser(
+        "author-review-plan",
+        help="Editorial planning step. Decides best form, 3 directions, must-keep strategic comments, detail pool, demote/drop.",
+    )
+    plan.add_argument("paper_shape_path", type=Path)
+    plan.add_argument("meta_comments_path", type=Path)
+    plan.add_argument("detail_audit_path", type=Path)
+    plan.add_argument("output_json_path", type=Path)
+    plan.add_argument("output_md_path", type=Path)
+    plan.add_argument("--voice", choices=voices, default=DEFAULT_VOICE)
+    plan.add_argument("--template", type=Path, default=Path("templates/prompts/author_review_plan.md"))
+    plan.add_argument("--config", type=Path, default=Path("config/secrets.local.env"))
+    plan.add_argument("--model", default=META_DEFAULT_MODEL)
+    plan.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    plan.add_argument("--no-strong-model", action="store_true", help="Skip the strong model and use the offline fallback")
+    plan.add_argument(
+        "--methodology-adversary",
+        type=Path,
+        default=None,
+        help="Optional reviews/methodology_adversary.json (or .merged.json); fatal/major findings are force-merged into must_keep_strategic, and merged inputs additionally pipe needs_human_decision through to the plan",
+    )
+
+    adversary = subparsers.add_parser(
+        "methodology-adversary",
+        help="Adversarial methodology audit. Reads intro+methods+results, emits hidden_assumptions + unmet_research_goals JSON for plan to consume.",
+    )
+    adversary.add_argument("intro_path", type=Path, help="units/chapters/chapter_01.md")
+    adversary.add_argument("methods_path", type=Path, help="units/chapters/chapter_03.md")
+    adversary.add_argument("results_path", type=Path, help="units/chapters/chapter_04.md")
+    adversary.add_argument("output_path", type=Path, help="reviews/methodology_adversary.json")
+    adversary.add_argument("--template", type=Path, default=Path("templates/prompts/methodology_adversary.md"))
+    adversary.add_argument("--config", type=Path, default=Path("config/secrets.local.env"))
+    adversary.add_argument("--model", default=METHODOLOGY_ADVERSARY_DEFAULT_MODEL)
+    adversary.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    adversary.add_argument("--case-id", default="")
+    adversary.add_argument("--no-strong-model", action="store_true", help="Write an offline stub instead of calling the strong model")
+    adversary.add_argument("--provider", default="deepseek", help="Provider name from the registry (deepseek|claude|openai|gpt|manual|external_file)")
+    adversary.add_argument("--n-runs", type=int, default=1, help="Run the prompt N times at varied temperature; top-level lists are deduped across runs")
+    adversary.add_argument("--temperature", type=float, default=0.2, help="Base temperature; multi-run adds 0.1 per additional run")
+    adversary.add_argument("--external-input", type=Path, default=None, help="For --provider manual: path to a file containing the LLM response (created externally)")
+    adversary.add_argument("--prompt-cache", type=Path, default=None, help="For --provider manual: where to write the rendered prompt when the response file is missing")
+    adversary.add_argument("--skip-if-missing", action="store_true", help="For --provider manual: when external response is missing, write a manual_pending stub and exit 0 (instead of erroring)")
+
+    merge_adv = subparsers.add_parser(
+        "merge-methodology-adversaries",
+        help="Merge multiple methodology_adversary JSON files (e.g. one per provider/run) into a unified report with agreement classification and human-decision flags.",
+    )
+    merge_adv.add_argument("output_path", type=Path, help="reviews/methodology_adversary.merged.json")
+    merge_adv.add_argument("--input", action="append", default=[], type=Path, help="Adversary JSON to merge (repeat). Missing files are skipped.")
+    merge_adv.add_argument("--md", type=Path, default=None, help="Optional Markdown rendering of the merged report")
+    merge_adv.add_argument("--similarity-threshold", type=float, default=None, help="Sørensen–Dice threshold for grouping near-duplicate findings (default: 0.3)")
+
+    rewrite = subparsers.add_parser(
+        "author-editorial-rewrite",
+        help="Strong-model rewrite of the author-facing review using the editorial plan. Falls back to deterministic compose+polish offline.",
+    )
+    rewrite.add_argument("paper_shape_path", type=Path)
+    rewrite.add_argument("plan_path", type=Path)
+    rewrite.add_argument("meta_comments_path", type=Path)
+    rewrite.add_argument("detail_audit_path", type=Path)
+    rewrite.add_argument("source_map_path", type=Path)
+    rewrite.add_argument("output_md_path", type=Path)
+    rewrite.add_argument("--voice", choices=voices, default=DEFAULT_VOICE)
+    rewrite.add_argument("--template", type=Path, default=Path("templates/prompts/author_editorial_rewrite.md"))
+    rewrite.add_argument("--config", type=Path, default=Path("config/secrets.local.env"))
+    rewrite.add_argument("--model", default=META_DEFAULT_MODEL)
+    rewrite.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    rewrite.add_argument("--no-strong-model", action="store_true", help="Skip the strong model and use the offline fallback")
+    rewrite.add_argument("--provider", default="deepseek", help="Provider name from the registry (deepseek|claude|openai|gpt|manual|external_file)")
+    rewrite.add_argument("--external-input", type=Path, default=None, help="For --provider manual: path to a file containing the externally-generated rewrite Markdown")
+    rewrite.add_argument("--prompt-cache", type=Path, default=None, help="For --provider manual: where to write the rendered prompt when the response file is missing")
+
     extract_claims = subparsers.add_parser("extract-claims", help="DeepSeek-extract author claims from a unit into a CLM draft JSON")
     extract_claims.add_argument("unit_path", type=Path)
     extract_claims.add_argument("output_path", type=Path)
@@ -158,6 +264,18 @@ def build_parser() -> argparse.ArgumentParser:
     extract_claims.add_argument("--config", type=Path, default=Path("config/secrets.local.env"))
     extract_claims.add_argument("--model", default=DEFAULT_MODEL)
     extract_claims.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    extract_claims.add_argument(
+        "--no-backfill-anchors",
+        action="store_true",
+        help="Skip text-match anchor backfill on the resulting claims_draft.json",
+    )
+
+    backfill_claims = subparsers.add_parser(
+        "backfill-claim-anchors",
+        help="Backfill missing line anchors in evidence/claims_draft.json by matching claim text to the unit",
+    )
+    backfill_claims.add_argument("claims_path", type=Path)
+    backfill_claims.add_argument("unit_path", type=Path)
 
     link_claims = subparsers.add_parser("link-issues-to-claims", help="Heuristically link reviews/issue_graph.json issues to evidence/claim_evidence_matrix.json claims by anchor proximity")
     link_claims.add_argument("claim_matrix_path", type=Path, help="evidence/claim_evidence_matrix.json")
@@ -241,6 +359,8 @@ def main(argv: list[str] | None = None) -> int:
             args.output_path,
             mode=mode,
             paper_shape_path=args.paper_shape,
+            locale=args.locale,
+            hide_priority=args.hide_priority,
         )
         print(args.output_path)
         return 0
@@ -317,6 +437,145 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{stats['kept_comments']} comments synthesized from {stats['input_issues']} issues -> {args.output_path}")
         return 0
 
+    if args.command == "detail-audit":
+        stats = build_detail_audit(
+            args.issue_graph_path,
+            args.output_path,
+            max_items=args.max_items,
+        )
+        print(f"{stats['detail_items']} detail items from {stats['input_issues']} issues -> {args.output_path}")
+        return 0
+
+    if args.command == "compose-author-review":
+        stats = compose_author_review(
+            paper_shape_path=args.paper_shape_path,
+            strategic_comments_path=args.strategic_comments_path,
+            detail_audit_path=args.detail_audit_path,
+            source_map_path=args.source_map_path,
+            output_md_path=args.output_md_path,
+            output_json_path=args.output_json,
+        )
+        print(
+            f"{stats['strategic_comments']} strategic comments + {stats['detail_items']} detail items "
+            f"-> {stats['output']}"
+        )
+        return 0
+
+    if args.command == "author-polish":
+        stats = polish_author_review(args.input_md_path, args.output_md_path)
+        print(f"{stats['chars']} chars -> {stats['output']}")
+        return 0
+
+    if args.command == "author-review-plan":
+        api_key = None if args.no_strong_model else get_config_value("DEEPSEEK_API_KEY", args.config)
+        stats = build_author_review_plan(
+            paper_shape_path=args.paper_shape_path,
+            meta_comments_path=args.meta_comments_path,
+            detail_audit_path=args.detail_audit_path,
+            output_json_path=args.output_json_path,
+            output_md_path=args.output_md_path,
+            voice=args.voice,
+            api_key=api_key or None,
+            prompt_template=args.template,
+            model=args.model,
+            base_url=args.base_url,
+            methodology_adversary_path=args.methodology_adversary,
+        )
+        print(
+            f"plan source={stats['source']} voice={stats['voice']} "
+            f"must_keep={stats['must_keep']} detail_pool={stats['detail_pool']} -> {stats['output_json']}"
+        )
+        return 0
+
+    if args.command == "methodology-adversary":
+        api_key = None if args.no_strong_model else get_config_value("DEEPSEEK_API_KEY", args.config)
+        stats = run_methodology_adversary(
+            intro_path=args.intro_path,
+            methods_path=args.methods_path,
+            results_path=args.results_path,
+            output_path=args.output_path,
+            prompt_template=args.template,
+            api_key=api_key or None,
+            model=args.model,
+            base_url=args.base_url,
+            case_id=args.case_id,
+            provider=args.provider,
+            n_runs=args.n_runs,
+            temperature=args.temperature,
+            external_input=args.external_input,
+            prompt_cache=args.prompt_cache,
+            skip_if_missing=args.skip_if_missing,
+        )
+        print(
+            f"adversary provider={stats['provider']} source={stats['source']} "
+            f"runs={stats['n_runs']} fatal={stats['fatal']} major={stats['major']} "
+            f"moderate={stats['moderate']} unmet_goals={stats['unmet_goals']} -> {stats['output']}"
+        )
+        return 0
+
+    if args.command == "merge-methodology-adversaries":
+        from review_council.adversary_merge import merge_adversaries
+
+        if not args.input:
+            print("ERROR: at least one --input is required")
+            return 1
+        from review_council.adversary_merge import DEFAULT_SIMILARITY
+
+        merged = merge_adversaries(
+            args.input,
+            args.output_path,
+            similarity_threshold=args.similarity_threshold if args.similarity_threshold is not None else DEFAULT_SIMILARITY,
+            md_output_path=args.md,
+        )
+        print(
+            f"merged providers={','.join(merged.get('providers') or []) or '(none)'} "
+            f"runs={merged.get('n_total_runs', 0)} "
+            f"hidden_assumptions={len(merged.get('hidden_assumptions') or [])} "
+            f"unmet_goals={len(merged.get('unmet_research_goals') or [])} "
+            f"claim_dependencies={len(merged.get('headline_claim_dependencies') or [])} "
+            f"needs_human={len(merged.get('needs_human_decision') or [])} "
+            f"skipped={len(merged.get('skipped_inputs') or [])} -> {args.output_path}"
+        )
+        return 0
+
+    if args.command == "author-editorial-rewrite":
+        api_key = None if args.no_strong_model else get_config_value("DEEPSEEK_API_KEY", args.config)
+        try:
+            stats = run_author_editorial_rewrite(
+                paper_shape_path=args.paper_shape_path,
+                plan_path=args.plan_path,
+                meta_comments_path=args.meta_comments_path,
+                detail_audit_path=args.detail_audit_path,
+                source_map_path=args.source_map_path,
+                output_md_path=args.output_md_path,
+                voice=args.voice,
+                api_key=api_key or None,
+                prompt_template=args.template,
+                model=args.model,
+                base_url=args.base_url,
+                provider=args.provider,
+                external_input=args.external_input,
+                prompt_cache=args.prompt_cache,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Manual provider with no external response yet — surface the
+            # actionable error and exit non-zero so the workflow stops cleanly.
+            from review_council.providers.manual_provider import ManualPendingError
+
+            if isinstance(exc, ManualPendingError):
+                print(f"PENDING: {exc}")
+                return 2
+            raise
+        rc = 0
+        if stats["leaks"]:
+            print(f"WARNING: {len(stats['leaks'])} internal tokens leaked: {stats['leaks'][:5]}")
+            rc = 1
+        print(
+            f"rewrite provider={stats['provider']} voice={stats['voice']} "
+            f"used_strong={stats['used_strong']} chars={stats['chars']} -> {stats['output']}"
+        )
+        return rc
+
     if args.command == "score-section-risk":
         path = write_risk_table(args.units_root, args.output)
         print(path)
@@ -347,7 +606,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         args.output_path.parent.mkdir(parents=True, exist_ok=True)
         args.output_path.write_text(response.rstrip() + "\n", encoding="utf-8")
+        if not args.no_backfill_anchors:
+            try:
+                stats = backfill_claim_anchors(args.output_path, args.unit_path)
+                print(
+                    f"{args.output_path}  ({stats['backfilled']}/{stats['claims']} anchors backfilled)"
+                )
+                return 0
+            except (json.JSONDecodeError, OSError) as exc:
+                print(f"WARNING: anchor backfill failed: {exc}")
         print(args.output_path)
+        return 0
+
+    if args.command == "backfill-claim-anchors":
+        stats = backfill_claim_anchors(args.claims_path, args.unit_path)
+        print(f"{stats['backfilled']}/{stats['claims']} anchors backfilled in {args.claims_path}")
         return 0
 
     if args.command == "link-issues-to-claims":
@@ -400,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
             until=args.until or None,
         )
         print(format_results_table(results))
-        return 0 if not any(r.status == "error" for r in results) else 1
+        return 0 if not any(r.status in {"error", "partial"} for r in results) else 1
 
     if args.command == "deepseek-review-unit":
         api_key = get_config_value("DEEPSEEK_API_KEY", args.config)
